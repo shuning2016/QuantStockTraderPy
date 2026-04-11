@@ -686,6 +686,14 @@ def dispatch(action: str, data: dict):
     # Trade state
     if action == "getTradeState":
         return load_trade_state(data.get("provider", "grok"))
+    if action == "saveStateToBackend":
+        # Frontend pushes its localStorage copy back to /tmp after cold start
+        provider = data.get("provider", "grok")
+        state    = data.get("state")
+        if state and isinstance(state, dict):
+            save_trade_state(provider, state)
+            return {"ok": True}
+        return {"ok": False, "error": "no state provided"}
     if action == "resetTradeState":
         return reset_trade_state(data.get("provider", "grok"))
     if action == "getQuantMetrics":

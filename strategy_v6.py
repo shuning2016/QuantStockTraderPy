@@ -8,7 +8,7 @@ A01_philosophy → A10_system_control
 3. 风险优先于收益 — E = P(win)×Avg(win) - P(loss)×Avg(loss)
 """
 
-import math, re, time
+import math, re, time, logging as _logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -164,8 +164,7 @@ def check_auto_stop_rules(state: dict, session: str) -> list:
         if sym not in last_prices:
             # R4: price unavailable — skip stop check rather than using avgCost
             # (avgCost always gives pnl_pct=0 and silently disables stop logic)
-            import logging as _lg
-            _lg.getLogger("quant.stops").warning(
+            _logging.getLogger("quant.stops").warning(
                 "No price for %s in lastPrices — stop check skipped this cycle. "
                 "Ensure price feed is healthy.", sym)
             continue

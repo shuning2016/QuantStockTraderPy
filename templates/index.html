@@ -250,20 +250,13 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
         <div class="list-header"><span class="list-label stock">📈 股票</span></div>
         <div class="add-row">
           <input type="text" id="stock-inp" placeholder="AAPL, NVDA…"
+                 oninput="this.value=this.value.toUpperCase()"
                  onkeydown="if(event.key==='Enter')addItem('stock')" maxlength="12">
           <button class="add-btn stock" onclick="addItem('stock')">+</button>
         </div>
         <div class="item-list" id="stock-list"></div>
       </div>
-      <div class="list-section" style="margin-bottom:0">
-        <div class="list-header"><span class="list-label crypto">₿ Crypto</span></div>
-        <div class="add-row">
-          <input type="text" id="crypto-inp" class="crypto-inp" placeholder="BTC, ETH…"
-                 onkeydown="if(event.key==='Enter')addItem('crypto')" maxlength="12">
-          <button class="add-btn crypto" onclick="addItem('crypto')">+</button>
-        </div>
-        <div class="item-list" id="crypto-list"></div>
-      </div>
+<div id="crypto-list" style="display:none"></div>
     </div>
 
     <div class="card">
@@ -409,12 +402,30 @@ const itemKey=(sym,type)=>sym+':'+type;
 // ═══════════════════════════════════════════════════════════════
 //  WATCHLIST
 // ═══════════════════════════════════════════════════════════════
-let stocks=[], activeKey=null, quoteCache={}, newsCache={};
+let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={};
 
 async function loadStocks(){
-  try{stocks=await api('getStocks');}
-  catch(e){stocks=JSON.parse(localStorage.getItem('wl')||'[]');}
+  // Priority 1: localStorage (instant, survives Vercel cold starts)
+  const cached = localStorage.getItem('wl');
+  if(cached){
+    try{ stocks = JSON.parse(cached); }catch(e){ stocks=[]; }
+  }
   renderLists(); renderChips();
+  // Priority 2: sync from backend in background (don't block UI)
+  try{
+    const remote = await api('getStocks');
+    if(remote && Array.isArray(remote) && remote.length > 0){
+      // Merge: backend wins for any conflict, but keep local-only items
+      const remoteKeys = new Set(remote.map(s=>itemKey(s.symbol,s.type)));
+      const localOnly  = stocks.filter(s=>!remoteKeys.has(itemKey(s.symbol,s.type)));
+      stocks = [...remote, ...localOnly];
+    } else if(stocks.length > 0){
+      // Backend empty but localStorage has data: push local up to backend
+      await api('saveStocks',{stocks});
+    }
+    localStorage.setItem('wl', JSON.stringify(stocks));
+    renderLists(); renderChips();
+  }catch(e){ /* backend unavailable — localStorage copy is source of truth */ }
 }
 async function addItem(type){
   const id=type==='stock'?'stock-inp':'crypto-inp';
@@ -436,10 +447,13 @@ async function deleteItem(sym,type){
   activeKey?showActiveCard(activeKey):showEmptyPanel();
 }
 async function persistStocks(){
-  localStorage.setItem('wl',JSON.stringify(stocks));
-  try{await api('saveStocks',{stocks});toast('已保存','ok');}catch(e){toast('本地已保存');}
+  // Always save to localStorage first (never lost on cold start)
+  localStorage.setItem('wl', JSON.stringify(stocks));
+  // Then sync to backend (best-effort)
+  try{ await api('saveStocks',{stocks}); }
+  catch(e){ /* backend sync failed, localStorage copy is safe */ }
 }
-function renderLists(){renderOneList('stock');renderOneList('crypto');}
+function renderLists(){renderOneList('stock');}
 function renderOneList(type){
   const el=document.getElementById(type+'-list');
   const sub=stocks.filter(s=>s.type===type);
@@ -454,11 +468,9 @@ function renderOneList(type){
 }
 function renderChips(){
   const el=document.getElementById('chip-row');
-  const si=stocks.filter(s=>s.type==='stock'), ci=stocks.filter(s=>s.type==='crypto');
-  const mk=s=>{const key=itemKey(s.symbol,s.type),isc=s.type==='crypto';let c='chip'+(isc?' crypto':'');if(activeKey===key)c+=isc?' active-crypto':' active-stock';return`<span class="${c}" onclick="setActive('${key}')">${s.symbol}</span>`;};
-  let html=si.map(mk).join('');
-  if(si.length&&ci.length)html+='<span style="color:var(--bdr);font-size:14px;align-self:center">|</span>';
-  html+=ci.map(mk).join(''); el.innerHTML=html;
+  const si=stocks.filter(s=>s.type==='stock');
+  const mk=s=>{const key=itemKey(s.symbol,s.type);let c='chip';if(activeKey===key)c+=' active-stock';return`<span class="${c}" onclick="setActive('${key}')">${s.symbol}</span>`;};
+  el.innerHTML=si.map(mk).join('');
 }
 function setActive(key){activeKey=key;renderLists();renderChips();showActiveCard(key);}
 function showEmptyPanel(){document.getElementById('news-list').innerHTML='<div class="empty-panel">← 点击左侧股票或 Coin 查看详情</div>';}
@@ -499,8 +511,15 @@ function buildCard(item,loading){
   let newsHtml='';
   if(news&&news.length){newsHtml=`<div class="news-section"><div class="news-sec-title">近 24h 新闻</div>${news.map(n=>`<div class="nc${ic?' crypto':''}"><div class="nc-meta"><span class="nc-src">${esc(n.source)}</span><span style="color:var(--bdr)">·</span><span class="nc-time">${fmtTime(n.datetime)}</span>${sentBadge(n.sentiment)}</div><a class="nc-hl" href="${n.url}" target="_blank" rel="noopener">${esc(n.headline)}</a>${n.summary?`<div class="nc-sum">${esc(n.summary.slice(0,200))}${n.summary.length>200?'…':''}</div>`:''}<a class="nc-more" href="${n.url}" target="_blank" rel="noopener">查看详细 →</a></div>`).join('')}</div>`;}
   else if(news){newsHtml=`<div class="news-section"><div style="font-size:12px;color:var(--t3);padding:4px 0">近 24h 无相关新闻</div></div>`;}
-  const existAI=document.getElementById('ai-wrap-'+CSS.escape(key));
-  const aiHtml=existAI?existAI.outerHTML:`<div id="ai-wrap-${key}" class="ai-wrap" style="display:none"></div>`;
+  // Restore AI result from in-memory cache (DOM is wiped on tab/stock switch)
+  const cachedAI = aiCache[key];
+  const aiHtml = cachedAI
+    ? `<div id="ai-wrap-${key}" class="ai-wrap"><div class="ai-panel">
+        <div class="ai-title">✦ AI 分析 — ${item.symbol} <span style="font-size:10px;color:var(--t3);font-weight:400">（已缓存）</span></div>
+        ${cachedAI.verdict ? `<div class="ai-verdict ${cachedAI.vcls}">${cachedAI.vlabel}</div>` : ''}
+        <div class="ai-txt">${esc(cachedAI.text)}</div>
+      </div></div>`
+    : `<div id="ai-wrap-${key}" class="ai-wrap" style="display:none"></div>`;
   return`<div class="qcard${ic?' crypto':''}" id="card-${key}">${qHead}<div class="qcard-actions"><button class="btn btn-p btn-sm" onclick="queryItem('${item.symbol}','${item.type}')" id="qbtn-${key}">🔍 查询行情 &amp; 新闻</button><button class="ai-btn" onclick="analyzeItem('${item.symbol}','${item.type}')" id="ai-btn-${key}">🤖 AI 分析</button></div>${aiHtml}${newsHtml}</div>`;
 }
 async function queryItem(sym,type){
@@ -533,7 +552,10 @@ async function analyzeItem(sym,type){
     const verdict=vm?vm[1]:'';
     const vc=/看涨|bullish/i.test(verdict)?'bullish':/看跌|bearish/i.test(verdict)?'bearish':'neutral';
     const vl=/看涨|bullish/i.test(verdict)?'📈 看涨':/看跌|bearish/i.test(verdict)?'📉 看跌':'⚖️ 中性';
-    wrap.innerHTML=`<div class="ai-panel"><div class="ai-title">✦ AI 分析 — ${sym}</div>${verdict?`<div class="ai-verdict ${vc}">${vl}</div>`:''}<div class="ai-txt">${esc(text.replace(/VERDICT:.*/,'').trim())}</div></div>`;
+    const cleanText = text.replace(/VERDICT:.*/,'').trim();
+    // Save to memory cache so result survives tab/stock switches
+    aiCache[key] = {text: cleanText, verdict, vcls: vc, vlabel: vl};
+    wrap.innerHTML=`<div class="ai-panel"><div class="ai-title">✦ AI 分析 — ${sym}</div>${verdict?`<div class="ai-verdict ${vc}">${vl}</div>`:''}<div class="ai-txt">${esc(cleanText)}</div></div>`;
   }catch(e){wrap.innerHTML=`<div class="ai-panel"><div class="ai-title" style="color:var(--red)">分析失败</div><div class="ai-txt">${esc(e.message)}</div></div>`;}
   btn.disabled=false;btn.innerHTML='🤖 AI 分析';
 }
@@ -593,7 +615,27 @@ async function syncFromBackend(ai){
   ai=ai||currentTradeAI;
   try{
     const s=await api('getTradeState',{provider:ai});
-    if(s){const lp=(tradeState&&tradeState.lastPrices)||{};tradeState=s;tradeState.lastPrices=Object.assign({},s.lastPrices||{},lp);tradeState._syncedAt=Date.now();saveTradeStateLocal(ai);}
+    if(!s) return;
+    const lp=(tradeState&&tradeState.lastPrices)||{};
+
+    // Bug 5/6 fix: never wipe a live local state with an empty backend state.
+    // Vercel /tmp resets on cold start → backend returns cash=$10000, no log.
+    // If local state has trades/holdings, it is more up-to-date than backend.
+    const backendIsEmpty = (s.cash===10000 && !Object.keys(s.holdings||{}).length && !(s.log||[]).length);
+    const localHasData   = tradeState && ((tradeState.log||[]).length>0 || Object.keys(tradeState.holdings||{}).length>0);
+
+    if(backendIsEmpty && localHasData){
+      // Push local state back up to backend to re-populate /tmp
+      await api('saveStateToBackend',{provider:ai,state:tradeState}).catch(()=>{});
+      tradeState._syncedAt=Date.now();
+      return;
+    }
+
+    // Backend has real data — merge and use it
+    tradeState=s;
+    tradeState.lastPrices=Object.assign({},s.lastPrices||{},lp);
+    tradeState._syncedAt=Date.now();
+    saveTradeStateLocal(ai);
   }catch(e){}
 }
 
@@ -616,8 +658,14 @@ function switchTradeAI(ai){
 }
 
 async function initTradePanel(){
-  loadTradeStateLocal(currentTradeAI); renderTradePanel();
-  await syncFromBackend(currentTradeAI); renderTradePanel();
+  // Step 1: show localStorage state immediately (no latency)
+  loadTradeStateLocal(currentTradeAI);
+  renderTradePanel();
+  _renderMetricsLocal();
+  // Step 2: sync with backend — but only adopt backend state if it has more data
+  await syncFromBackend(currentTradeAI);
+  renderTradePanel();
+  // Step 3: fetch quant metrics from backend (computed server-side)
   await refreshQuantMetrics(currentTradeAI);
 }
 async function refreshTradePanel(){
