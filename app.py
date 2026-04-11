@@ -34,6 +34,17 @@ from strategy_v6 import (
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.urandom(24)
 
+# ─── Logging setup ────────────────────────────────────────────────
+# Vercel captures stdout/stderr — use INFO level so debug lines appear
+# in the Vercel Functions log viewer (dashboard → Deployments → Functions)
+import logging as _logging
+_logging.basicConfig(
+    level=_logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+_logging.getLogger("quant.session").setLevel(_logging.DEBUG)
+
 # ─── Startup config check ────────────────────────────────────────
 import logging as _logging
 for _w in check_config():
@@ -86,12 +97,37 @@ STATE_DIR      = DATA_DIR / "trade_states"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_watchlist():
+    # Priority 1: local file (works locally and persists across restarts)
     if WATCHLIST_FILE.exists():
-        return json.loads(WATCHLIST_FILE.read_text())
+        try:
+            return json.loads(WATCHLIST_FILE.read_text())
+        except Exception:
+            pass
+    # Priority 2: WATCHLIST env var (set this in Vercel dashboard to persist
+    # across cold starts — copy the JSON array value from a working session)
+    env_wl = os.environ.get("WATCHLIST_JSON", "")
+    if env_wl:
+        try:
+            return json.loads(env_wl)
+        except Exception:
+            pass
     return []
 
 def save_watchlist(stocks):
-    WATCHLIST_FILE.write_text(json.dumps(stocks))
+    # Always try to write the file (works locally; /tmp on Vercel — temporary but
+    # better than nothing within a session)
+    try:
+        WATCHLIST_FILE.write_text(json.dumps(stocks))
+    except OSError:
+        pass
+    # Hint in logs so user knows to set env var for persistence on Vercel
+    if os.environ.get("VERCEL"):
+        import logging as _l
+        _l.getLogger(__name__).warning(
+            "VERCEL: watchlist saved to /tmp only (ephemeral). "
+            "To persist across deployments, set WATCHLIST_JSON env var in "
+            "Vercel dashboard to: %s", json.dumps(stocks)
+        )
 
 def _state_file(provider: str) -> Path:
     return STATE_DIR / f"state_{provider}.json"
@@ -450,14 +486,39 @@ def run_trade_session(session: str, provider: str) -> dict:
             atr_est[s["symbol"]] = atr
 
     # Parse and execute decisions (skip for premarket)
-    executed = []
-    if session != "premarket":
+    import logging as _log
+    _logger = _log.getLogger("quant.session")
+    decisions = []
+    executed  = []
+
+    if session == "premarket":
+        _logger.info("[%s/%s] premarket — analysis only, no execution", provider, session)
+    else:
         decisions = parse_ai_decisions(ai_text)
+        _logger.info("[%s/%s] parsed %d decision(s): %s",
+                     provider, session, len(decisions),
+                     [(d["action"], d["symbol"], d["shares"], d.get("parse_mode","?"))
+                      for d in decisions])
+
+        if not decisions:
+            _logger.warning("[%s/%s] NO decisions parsed — AI text preview: %s",
+                            provider, session, ai_text[:400])
+
         # Inject confidence scores
         for d in decisions:
             if d["symbol"]:
                 d["confidence"] = parse_confidence_score(ai_text, d["symbol"])
+
+        # Log pre-execution state
+        _logger.info("[%s/%s] pre-exec state: cash=$%.2f holdings=%s regime=%s",
+                     provider, session, state["cash"],
+                     list(state["holdings"].keys()),
+                     state.get("currentRegime", "?"))
+
         executed = execute_decisions(decisions, state, session, prices, atr_est)
+
+        _logger.info("[%s/%s] execution results (%d lines): %s",
+                     provider, session, len(executed), executed)
 
     # ── Execution diagnostic log ──────────────────────────────────
     # Records every decision attempt with outcome + reason, so you can
