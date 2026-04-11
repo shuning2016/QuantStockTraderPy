@@ -492,6 +492,10 @@ def run_trade_session(session: str, provider: str) -> dict:
     }
 
 # ─── Routes ───────────────────────────────────────────────────────
+@app.route("/favicon.ico")
+def favicon():
+    # Return empty 204 No Content — stops the browser 404 log noise
+    return "", 204
 @app.route("/")
 def index():
     # Serve index.html as a plain static file — NOT through Jinja2.
