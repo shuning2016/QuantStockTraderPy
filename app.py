@@ -14,7 +14,7 @@ except ImportError:
     from datetime import timezone as _tz, timedelta
     _ET = _tz(timedelta(hours=-5))
 import requests
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 
 # ─── Config (API keys, model names, cache TTLs) ─────────────────
 from config import (
@@ -494,7 +494,12 @@ def run_trade_session(session: str, provider: str) -> dict:
 # ─── Routes ───────────────────────────────────────────────────────
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Serve index.html as a plain static file — NOT through Jinja2.
+    # The HTML contains JavaScript with {{ }} object literals which
+    # Jinja2 would try to interpret as template variables and crash.
+    html_path = Path(__file__).parent / "templates" / "index.html"
+    return Response(html_path.read_text(encoding="utf-8"),
+                    mimetype="text/html")
 
 @app.route("/api", methods=["POST"])
 def api():
