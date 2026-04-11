@@ -49,7 +49,6 @@ _logging.basicConfig(
 _logging.getLogger("quant.session").setLevel(_logging.DEBUG)
 
 # ─── Startup config check ────────────────────────────────────────
-import logging as _logging
 for _w in check_config():
     _logging.getLogger(__name__).warning("CONFIG: %s", _w)
 
@@ -128,8 +127,7 @@ def save_watchlist(stocks):
         pass
     # Hint in logs so user knows to set env var for persistence on Vercel
     if os.environ.get("VERCEL"):
-        import logging as _l
-        _l.getLogger(__name__).warning(
+        _logging.getLogger(__name__).warning(
             "VERCEL: watchlist saved to /tmp only (ephemeral). "
             "To persist across deployments, set WATCHLIST_JSON env var in "
             "Vercel dashboard to: %s", json.dumps(stocks)
@@ -193,7 +191,7 @@ def _month_log_path(prefix: str, date_str: str = None) -> Path:
 def append_log(prefix: str, entry: dict, date_str: str = None):
     path = _month_log_path(prefix, date_str)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, default=str) + "\n")
+        f.write(json.dumps(entry, default=_json_safe) + "\n")
 
 def read_log_range(prefix: str, from_date: str, to_date: str,
                    ai_provider: str = None) -> list:
@@ -531,8 +529,7 @@ def run_trade_session(session: str, provider: str) -> dict:
             atr_est[s["symbol"]] = atr
 
     # Parse and execute decisions (skip for premarket)
-    import logging as _log
-    _logger = _log.getLogger("quant.session")
+    _logger = _logging.getLogger("quant.session")
     decisions = []
     executed  = []
 

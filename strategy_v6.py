@@ -158,8 +158,18 @@ def check_position_rules(state: dict, sym: str, shares: int, price: float) -> di
 # ─── Section 4: Trailing Stop / Auto Exits (A04) ─────────────────
 def check_auto_stop_rules(state: dict, session: str) -> list:
     sells = []
+    _logger = None  # lazy-init only if needed to avoid import overhead
     for sym, h in state.get("holdings", {}).items():
-        price = state.get("lastPrices", {}).get(sym, h["avgCost"])
+        last_prices = state.get("lastPrices", {})
+        if sym not in last_prices:
+            # R4: price unavailable — skip stop check rather than using avgCost
+            # (avgCost always gives pnl_pct=0 and silently disables stop logic)
+            import logging as _lg
+            _lg.getLogger("quant.stops").warning(
+                "No price for %s in lastPrices — stop check skipped this cycle. "
+                "Ensure price feed is healthy.", sym)
+            continue
+        price = last_prices[sym]
         atr   = h.get("entryAtr", h["avgCost"] * 0.02)
         h["highPrice"] = max(h.get("highPrice", price), price)
 
@@ -277,7 +287,7 @@ def check_feedback_trigger(state: dict) -> Optional[dict]:
 def check_operating_rules(state: dict) -> dict:
     violations = []
     for sym, h in state.get("holdings", {}).items():
-        if not h.get("stopPrice"):
+        if h.get("stopPrice") is None:
             violations.append(f"{sym} 持仓无止损价记录")
     fb = check_feedback_trigger(state)
     if fb:
@@ -469,13 +479,7 @@ def parse_atr_from_text(ai_text: str, symbol: str) -> Optional[float]:
                 val = float(m.group(1).replace(",", ""))
                 if val > 0:
                     return val
-    # Global fallback
-    m = _atr_pat.search(ai_text)
-    if m:
-        val = float(m.group(1).replace(",", ""))
-        if val > 0:
-            return val
-    return None
+    return None  # R3: no global fallback — wrong symbol ATR is worse than None
 
 
 # ─── Section 9: Prompt Builder (A03+A10) ─────────────────────────
