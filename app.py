@@ -39,15 +39,51 @@ import logging as _logging
 for _w in check_config():
     _logging.getLogger(__name__).warning("CONFIG: %s", _w)
 
-DATA_DIR   = Path("data")
-LOGS_DIR   = Path("logs")
-DATA_DIR.mkdir(exist_ok=True)
-LOGS_DIR.mkdir(exist_ok=True)
+# ─── Storage root ─────────────────────────────────────────────────
+# Vercel (and most serverless platforms) have a read-only filesystem
+# except for /tmp.  We use /tmp when the normal "data/" directory
+# cannot be created, so the same code works locally AND on Vercel.
+def _make_storage_root() -> Path:
+    """
+    Return the writable storage root directory.
+
+    Strategy (in order):
+    1. If VERCEL env var is set → always use /tmp  (Vercel sets this automatically)
+    2. If any other read-only platform signal is present → use /tmp
+    3. Otherwise try to write to a local ./data folder (normal local dev)
+    4. If that write fails (read-only OS mount) → fall back to /tmp
+    """
+    tmp = Path("/tmp/quant_trader_data")
+
+    # Vercel sets VERCEL=1 in all serverless functions
+    # AWS Lambda sets AWS_LAMBDA_FUNCTION_NAME
+    # Railway / Render also have a read-only project root
+    serverless_signals = ["VERCEL", "AWS_LAMBDA_FUNCTION_NAME", "LAMBDA_TASK_ROOT"]
+    if any(os.environ.get(sig) for sig in serverless_signals):
+        tmp.mkdir(parents=True, exist_ok=True)
+        return tmp
+
+    # Local dev: try ./data first
+    local = Path("data")
+    try:
+        local.mkdir(exist_ok=True)
+        test = local / ".write_test"
+        test.write_text("ok")
+        test.unlink()
+        return local
+    except OSError:
+        # OS-level read-only mount (some CI / container environments)
+        tmp.mkdir(parents=True, exist_ok=True)
+        return tmp
+
+DATA_DIR  = _make_storage_root()
+LOGS_DIR  = DATA_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── Data persistence (JSON files, equivalent to GAS PropertiesService) ──
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 STATE_DIR      = DATA_DIR / "trade_states"
-STATE_DIR.mkdir(exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_watchlist():
     if WATCHLIST_FILE.exists():
