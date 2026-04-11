@@ -459,6 +459,39 @@ def run_trade_session(session: str, provider: str) -> dict:
                 d["confidence"] = parse_confidence_score(ai_text, d["symbol"])
         executed = execute_decisions(decisions, state, session, prices, atr_est)
 
+    # ── Execution diagnostic log ──────────────────────────────────
+    # Records every decision attempt with outcome + reason, so you can
+    # always see in the log why a trade did or did not execute.
+    exec_log = []
+    for line in executed:
+        if line.startswith("✅"):
+            exec_log.append({"status": "executed",  "detail": line})
+        elif line.startswith("⚠️"):
+            exec_log.append({"status": "skipped",   "detail": line})
+        else:
+            exec_log.append({"status": "system",    "detail": line})
+
+    # If AI produced decisions but NONE executed, log the raw decisions too
+    if decisions and not any(e["status"] == "executed" for e in exec_log):
+        for d in decisions:
+            exec_log.append({
+                "status":     "parse_ok_but_not_executed",
+                "action":     d.get("action"),
+                "symbol":     d.get("symbol"),
+                "shares":     d.get("shares"),
+                "parse_mode": d.get("parse_mode", "structured"),
+                "detail":     f"Decision parsed but blocked by position rules or session rules",
+            })
+
+    # If NO decisions were parsed at all, record that clearly
+    if not decisions and session != "premarket":
+        exec_log.append({
+            "status": "no_decisions_parsed",
+            "detail": ("AI response did not contain a parseable DECISION block. "
+                       "Expected format: BUY|SYM|N|reason or prose buy/sell intent."),
+            "ai_text_preview": ai_text[:300],
+        })
+
     # Log session to JSONL
     session_entry = {
         "id": f"session_{int(time.time()*1000)}",
@@ -475,8 +508,11 @@ def run_trade_session(session: str, provider: str) -> dict:
                          for sym, h in state["holdings"].items()],
         },
         "ai_analysis": ai_text[:2000],
-        "executed": executed,
-        "regime": state.get("currentRegime", "Unknown"),
+        "executed":    executed,
+        "exec_log":    exec_log,
+        "regime":      state.get("currentRegime", "Unknown"),
+        "decisions_parsed": len(decisions),
+        "decisions_executed": sum(1 for e in exec_log if e["status"] == "executed"),
     }
     append_log("sessions", session_entry, state["_today"])
 
@@ -484,11 +520,14 @@ def run_trade_session(session: str, provider: str) -> dict:
     save_trade_state(provider, state)
 
     return {
-        "state":    state,
-        "aiText":   ai_text,
-        "executed": executed,
-        "session":  session,
-        "provider": provider,
+        "state":              state,
+        "aiText":             ai_text,
+        "executed":           executed,
+        "exec_log":           exec_log,
+        "decisions_parsed":   len(decisions),
+        "decisions_executed": sum(1 for e in exec_log if e["status"] == "executed"),
+        "session":            session,
+        "provider":           provider,
     }
 
 # ─── Routes ───────────────────────────────────────────────────────

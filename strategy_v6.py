@@ -289,11 +289,17 @@ def check_operating_rules(state: dict) -> dict:
 def parse_ai_decisions(ai_text):
     """
     Parse DECISION block from AI text. Handles:
-      - **DECISION:** BUY|SYM|N|reason  (single-line markdown bold, Grok/Claude style)
-      - DECISION:\nBUY|SYM|N|reason    (multi-line block)
-    Critical bug fix from original GAS: strict bare-DECISION: parser dropped all signals.
+      1. Standard pipe format:  BUY|SYM|N|reason
+      2. Markdown bold:         **DECISION:** BUY|SYM|N|reason
+      3. Prose fallback:        AI writes "决定入场AAPL" / "buy AAPL" in natural language
+                                instead of the structured format — we extract intent.
+
+    Returns list of {action, symbol, shares, reason, parse_mode}
+    parse_mode: 'structured' | 'prose_fallback'
     """
     import re as _re
+
+    # ── Pass 1: structured pipe format (preferred) ────────────────
     decisions = []
     block_lines = []
     in_block = False
@@ -301,7 +307,6 @@ def parse_ai_decisions(ai_text):
     for line in ai_text.split("\n"):
         if _re.search(r"DECISION\s*:", line, _re.IGNORECASE):
             in_block = True
-            # Remove **DECISION:** (or DECISION:) from line, keep the rest
             rest = _re.sub(r"\*{0,2}\s*DECISION\s*:\s*\*{0,2}", "", line,
                            flags=_re.IGNORECASE).strip()
             if rest:
@@ -310,7 +315,7 @@ def parse_ai_decisions(ai_text):
             stripped = line.strip().lstrip("*-\u2013 ")
             if stripped == "":
                 if block_lines:
-                    break   # blank line ends the block
+                    break
             else:
                 block_lines.append(stripped)
 
@@ -321,12 +326,81 @@ def parse_ai_decisions(ai_text):
         )
         if m:
             decisions.append({
-                "action":  m.group(1).upper(),
-                "symbol":  m.group(2).upper(),
-                "shares":  int(m.group(3)),
-                "reason":  m.group(4).strip(),
+                "action":     m.group(1).upper(),
+                "symbol":     m.group(2).upper(),
+                "shares":     int(m.group(3)),
+                "reason":     m.group(4).strip(),
+                "parse_mode": "structured",
             })
-    return decisions
+
+    if decisions:
+        return decisions
+
+    # ── Pass 2: prose fallback ────────────────────────────────────
+    # AI wrote natural language instead of pipe format.
+    # We extract the intent conservatively (only clear BUY/SELL signals).
+    prose = []
+
+    # Find all stock ticker mentions near buy/sell intent keywords
+    # Patterns: "入场AAPL" / "买入AAPL" / "buy AAPL" / "决定买AAPL"
+    #           "卖出AAPL" / "sell AAPL" / "平仓AAPL"
+    buy_cn  = r"(?:入场|买入|建仓|做多|开仓|购买|决定买)"
+    sell_cn = r"(?:卖出|平仓|止盈|止损|减仓|清仓|做空)"
+    buy_en  = r"(?:buy|long|enter|purchase)"
+    sell_en = r"(?:sell|close|exit|short)"
+    ticker  = r"([A-Z]{1,5}(?:\.[A-Z]{0,2})?)"
+
+    buy_pattern  = _re.compile(
+        rf"(?:{buy_cn}|{buy_en})\s*{ticker}", _re.IGNORECASE)
+    sell_pattern = _re.compile(
+        rf"(?:{sell_cn}|{sell_en})\s*{ticker}", _re.IGNORECASE)
+    # Also catch "ticker + buy intent" order: "AAPL 入场" / "AAPL buy"
+    rev_buy  = _re.compile(
+        rf"{ticker}\s*(?:{buy_cn}|{buy_en})", _re.IGNORECASE)
+    rev_sell = _re.compile(
+        rf"{ticker}\s*(?:{sell_cn}|{sell_en})", _re.IGNORECASE)
+
+    # Extract shares if mentioned: "33股" / "33 shares" / "33 lots"
+    shares_pat = _re.compile(r"(\d+)\s*(?:股|shares?|lots?)", _re.IGNORECASE)
+    # Extract price if mentioned: "$260.48" / "260.48"
+    price_pat  = _re.compile(r"(?:entry|入场|价格|price)[^\d]*\$?([\d,]+\.?\d*)",
+                              _re.IGNORECASE)
+
+    seen = set()
+    full_text = ai_text
+
+    for pat, action in [(buy_pattern, "BUY"), (rev_buy, "BUY"),
+                        (sell_pattern, "SELL"), (rev_sell, "SELL")]:
+        for m in pat.finditer(full_text):
+            sym = m.group(1).upper()
+            # Filter out common false positives (Chinese words, single chars)
+            if len(sym) < 2 or sym in {"SE", "A", "I", "AI", "IT"}:
+                # SE is valid (Sea Ltd), include it if it appears near intent
+                if sym != "SE":
+                    continue
+            key = (action, sym)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Try to extract shares from surrounding context (±200 chars)
+            ctx_start = max(0, m.start() - 200)
+            ctx_end   = min(len(full_text), m.end() + 200)
+            ctx       = full_text[ctx_start:ctx_end]
+
+            shares_m  = shares_pat.search(ctx)
+            shares    = int(shares_m.group(1)) if shares_m else 0
+
+            prose.append({
+                "action":     action,
+                "symbol":     sym,
+                "shares":     shares,
+                "reason":     f"[prose fallback] {ctx.strip()[:120]}",
+                "parse_mode": "prose_fallback",
+            })
+
+    return prose
+
 
 def parse_confidence_score(ai_text: str, symbol: str) -> int:
     pattern = rf'{re.escape(symbol)}.*?(?:C:|置信度[：:])(\d+)/10'
