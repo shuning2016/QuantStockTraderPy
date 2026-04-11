@@ -11,8 +11,11 @@ try:
     from zoneinfo import ZoneInfo
     _ET = ZoneInfo("America/New_York")
 except ImportError:
+    # Python < 3.9: approximate DST by checking if local clock is in summer.
+    import time as _time
     from datetime import timezone as _tz, timedelta
-    _ET = _tz(timedelta(hours=-5))
+    _is_dst = bool(getattr(_time, "daylight", 0) and _time.localtime().tm_isdst > 0)
+    _ET = _tz(timedelta(hours=-4 if _is_dst else -5))
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 
@@ -101,8 +104,11 @@ def load_watchlist():
     if WATCHLIST_FILE.exists():
         try:
             return json.loads(WATCHLIST_FILE.read_text())
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            _logging.getLogger(__name__).error(
+                "Watchlist file corrupted — resetting to empty. Error: %s", e)
+        except Exception as e:
+            _logging.getLogger(__name__).error("Could not read watchlist: %s", e)
     # Priority 2: WATCHLIST env var (set this in Vercel dashboard to persist
     # across cold starts — copy the JSON array value from a working session)
     env_wl = os.environ.get("WATCHLIST_JSON", "")
@@ -136,12 +142,15 @@ def load_trade_state(provider: str) -> dict:
     f = _state_file(provider)
     if f.exists():
         try:
-            state = json.loads(f.read_text())
+            raw = json.loads(f.read_text())
+            if not isinstance(raw, dict):
+                raise ValueError(f"State file for {provider} is not a dict")
+            state = raw
             # If state.log is empty but JSONL trade log has records,
             # rebuild state.log from the persistent JSONL file so the
             # trade panel shows history even after a Vercel cold start.
             if not state.get("log"):
-                today = today_et() if callable(today_et) else ""
+                today = today_et()
                 month = today[:7] if today else ""
                 trade_log = read_log_range("trades",
                                            month + "-01" if month else "2020-01-01",
@@ -150,12 +159,23 @@ def load_trade_state(provider: str) -> dict:
                 if trade_log:
                     state["log"] = list(reversed(trade_log))  # oldest first
             return state
-        except Exception:
-            pass
+        except (json.JSONDecodeError, ValueError) as e:
+            _logging.getLogger(__name__).error(
+                "State file for %s corrupted — starting fresh. Error: %s", provider, e)
+        except Exception as e:
+            _logging.getLogger(__name__).error("Could not load state for %s: %s", provider, e)
     return new_trade_state()
 
+def _json_safe(obj):
+    """Serialize non-JSON types cleanly (no silent str() coercion)."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 def save_trade_state(provider: str, state: dict):
-    _state_file(provider).write_text(json.dumps(state, default=str))
+    _state_file(provider).write_text(json.dumps(state, default=_json_safe))
 
 def reset_trade_state(provider: str) -> dict:
     s = new_trade_state()
@@ -236,6 +256,7 @@ def get_stock_quote(sym: str) -> dict:
         url = f"{FINNHUB_QUOTE_URL}?symbol={sym}&token={FINNHUB_KEY}"
         r   = requests.get(url, timeout=8)
         if r.status_code != 200:
+            _logging.getLogger("quant.data").warning("Finnhub quote %s: HTTP %s", sym, r.status_code)
             return None
         q   = r.json()
         dp  = q.get("c", 0) or q.get("pc", 0)
@@ -283,7 +304,8 @@ def get_crypto_quote(sym: str) -> dict:
         }
         _price_cache["crypto_" + sym] = res
         return res
-    except Exception:
+    except Exception as e:
+        _logging.getLogger("quant.data").warning("Crypto quote error for %s: %s", sym, e)
         return None
 
 def get_single_quote(sym: str, asset_type: str) -> dict:
@@ -327,7 +349,8 @@ def _fetch_stock_news(sym: str, limit: int) -> list:
                  "url": a.get("url", ""), "source": a.get("source", ""),
                  "datetime": a.get("datetime", 0) * 1000,
                  "sentiment": _sentiment(a.get("headline", ""))} for a in raw]
-    except Exception:
+    except Exception as e:
+        _logging.getLogger("quant.data").warning("Stock news error for %s: %s", sym, e)
         return []
 
 def _fetch_crypto_news(sym: str, limit: int) -> list:
@@ -392,6 +415,9 @@ def call_grok(prompt: str) -> str:
             timeout=60,
         )
         data = r.json()
+        if not r.ok or not data.get("choices"):
+            _logging.getLogger("quant.ai").error("Grok API error: %s", data)
+            return f"[ERROR] Grok API: {data.get('error', {}).get('message', str(data))}"
         return data["choices"][0]["message"]["content"]
     except Exception as e:
         return f"[ERROR] Grok: {e}"
@@ -409,6 +435,9 @@ def call_deepseek(prompt: str) -> str:
             timeout=60,
         )
         data = r.json()
+        if not r.ok or not data.get("choices"):
+            _logging.getLogger("quant.ai").error("DeepSeek API error: %s", data)
+            return f"[ERROR] DeepSeek API: {data.get('error', {}).get('message', str(data))}"
         return data["choices"][0]["message"]["content"]
     except Exception as e:
         return f"[ERROR] DeepSeek: {e}"
@@ -437,7 +466,7 @@ def run_trade_session(session: str, provider: str) -> dict:
         q = get_stock_quote(s["symbol"])
         if q:
             prices[s["symbol"]] = q.get("c", q.get("pc", 0))
-            state["lastPrices"][s["symbol"]] = prices[s["symbol"]]
+            state.setdefault("lastPrices", {})[s["symbol"]] = prices[s["symbol"]]
             # Rough ATR estimate: 1% of price (will be refined by AI)
             atr_est[s["symbol"]] = prices[s["symbol"]] * 0.01
 

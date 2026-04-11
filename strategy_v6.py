@@ -246,7 +246,7 @@ def get_quant_metrics(state: dict) -> dict:
         "feedbackAlert": fb, "equityCurve": curve,
         "targets": {
             "ev_ok": metrics["expectancy"] > CFG.TARGET_EV_MIN,
-            "dd_ok": max_dd < CFG.TARGET_MAX_DD * 100,
+            "dd_ok": max_dd < (CFG.TARGET_MAX_DD * 100),  # max_dd is %, TARGET_MAX_DD is ratio → *100
             "pf_ok": metrics["profitFactor"] >= CFG.TARGET_PROFIT_FACTOR,
         },
     }
@@ -363,9 +363,6 @@ def parse_ai_decisions(ai_text):
     # Extract shares if mentioned: "33股" / "33 shares" / "33 lots"
     shares_pat = _re.compile(r"(\d+)\s*(?:股|shares?|lots?)", _re.IGNORECASE)
     # Extract price if mentioned: "$260.48" / "260.48"
-    price_pat  = _re.compile(r"(?:entry|入场|价格|price)[^\d]*\$?([\d,]+\.?\d*)",
-                              _re.IGNORECASE)
-
     seen = set()
     full_text = ai_text
 
@@ -388,7 +385,8 @@ def parse_ai_decisions(ai_text):
             ctx_end   = min(len(full_text), m.end() + 200)
             ctx       = full_text[ctx_start:ctx_end]
 
-            shares_m  = shares_pat.search(ctx)
+            ctx_clean = ctx.replace(",", "")  # strip comma-separators ($2,500 → $2500)
+            shares_m  = shares_pat.search(ctx_clean)
             shares    = int(shares_m.group(1)) if shares_m else 0
 
             prose.append({
@@ -403,15 +401,32 @@ def parse_ai_decisions(ai_text):
 
 
 def parse_confidence_score(ai_text: str, symbol: str) -> int:
-    pattern = rf'{re.escape(symbol)}.*?(?:C:|置信度[：:])(\d+)/10'
-    m = re.search(pattern, ai_text, re.IGNORECASE)
+    """
+    Extract confidence score for a symbol.
+    Handles spaces/newlines between symbol and C: marker (H1 fix).
+    Search order:
+      1. Symbol … C:N/10 (same line or nearby, DOTALL)
+      2. Any line containing the symbol → first N/10 on that line
+      3. Global N/10 fallback (last resort)
+    """
+    # Pass 1: flexible DOTALL match within 300 chars after symbol
+    esc_sym = re.escape(symbol)
+    m = re.search(
+        rf'{esc_sym}[\s\S]{{0,300}}?(?:C:|置信度[：:])\s*(\d+)/10',
+        ai_text, re.IGNORECASE
+    )
     if m:
         return int(m.group(1))
-    for l in ai_text.split('\n'):
-        if symbol in l:
-            m2 = re.search(r'(\d+)/10', l)
+    # Pass 2: any line containing the symbol
+    for line in ai_text.split('\n'):
+        if symbol.upper() in line.upper():
+            m2 = re.search(r'(\d+)/10', line)
             if m2:
                 return int(m2.group(1))
+    # Pass 3: global scan (e.g. only one symbol in response)
+    m3 = re.search(r'(?:C:|置信度[：:])\s*(\d+)/10', ai_text, re.IGNORECASE)
+    if m3:
+        return int(m3.group(1))
     return 0
 
 
@@ -426,20 +441,41 @@ def parse_regime_from_text(ai_text: str) -> tuple:
     if m_adx:
         spy_adx = float(m_adx.group(1))
     if regime == "Chop":
-        spy_adx = 15.0; spy_above = False
+        spy_adx = 15.0
+        spy_above = False          # Chop: price below 200MA
     elif regime == "Transition":
         spy_adx = 22.0
+        spy_above = True           # Transition: price near 200MA, assume above
+    # Trend: spy_above stays True (default)
     return regime, spy_adx, spy_above
 
 
 def parse_atr_from_text(ai_text: str, symbol: str) -> Optional[float]:
-    for l in ai_text.split('\n'):
-        if symbol in l:
-            m = re.search(r'ATR.*?\$?\s*(\d+\.?\d*)', l, re.IGNORECASE)
+    """
+    Extract ATR value from AI text.
+    H5 fix: use non-greedy match + explicit decimal pattern to avoid
+    dropping decimal part (e.g. "$1.50" should not be captured as "1").
+    Pattern: ATR ... $? digits.digits (require at least one decimal digit).
+    """
+    # Precise pattern: ATR followed by optional text, then $N.NN
+    _atr_pat = re.compile(
+        r'ATR[^\n]{0,60}?\$?\s*(\d+\.\d+|\d+)',
+        re.IGNORECASE
+    )
+    for line in ai_text.split('\n'):
+        if symbol.upper() in line.upper():
+            m = _atr_pat.search(line)
             if m:
-                return float(m.group(1))
-    m = re.search(r'ATR.*?\$?\s*(\d+\.?\d*)', ai_text, re.IGNORECASE)
-    return float(m.group(1)) if m else None
+                val = float(m.group(1).replace(",", ""))
+                if val > 0:
+                    return val
+    # Global fallback
+    m = _atr_pat.search(ai_text)
+    if m:
+        val = float(m.group(1).replace(",", ""))
+        if val > 0:
+            return val
+    return None
 
 
 # ─── Section 9: Prompt Builder (A03+A10) ─────────────────────────
