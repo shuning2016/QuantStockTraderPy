@@ -135,7 +135,23 @@ def _state_file(provider: str) -> Path:
 def load_trade_state(provider: str) -> dict:
     f = _state_file(provider)
     if f.exists():
-        return json.loads(f.read_text())
+        try:
+            state = json.loads(f.read_text())
+            # If state.log is empty but JSONL trade log has records,
+            # rebuild state.log from the persistent JSONL file so the
+            # trade panel shows history even after a Vercel cold start.
+            if not state.get("log"):
+                today = today_et() if callable(today_et) else ""
+                month = today[:7] if today else ""
+                trade_log = read_log_range("trades",
+                                           month + "-01" if month else "2020-01-01",
+                                           today or "2099-12-31",
+                                           provider)
+                if trade_log:
+                    state["log"] = list(reversed(trade_log))  # oldest first
+            return state
+        except Exception:
+            pass
     return new_trade_state()
 
 def save_trade_state(provider: str, state: dict):
@@ -576,6 +592,13 @@ def run_trade_session(session: str, provider: str) -> dict:
         "decisions_executed": sum(1 for e in exec_log if e["status"] == "executed"),
     }
     append_log("sessions", session_entry, state["_today"])
+
+    # Write each individual trade to trades JSONL (persistent record)
+    # This is the source of truth that survives Vercel cold starts.
+    for entry in state.get("log", []):
+        if entry.get("date") == state["_today"] and not entry.get("_logged"):
+            append_log("trades", entry, state["_today"])
+            entry["_logged"] = True  # prevent double-write on next session
 
     # Persist state
     save_trade_state(provider, state)

@@ -308,7 +308,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
     <!-- Log panel -->
     <div id="panel-messages" style="display:none">
       <div class="log-tab-row">
-        <button class="log-tab-btn active" id="ltab-sessions" onclick="switchLogTab('sessions')">📊 AI Sessions</button>
+        <button class="log-tab-btn active" id="ltab-sessions" onclick="switchLogTab('sessions')">📊 全部记录</button>
         <button class="log-tab-btn"        id="ltab-trades"   onclick="switchLogTab('trades')">💹 交易记录</button>
         <button class="log-tab-btn"        id="ltab-files"    onclick="switchLogTab('files')">📁 日志文件</button>
       </div>
@@ -872,21 +872,83 @@ async function reloadLogTab(){
 
 function renderSessionLog(sessions){
   const el=document.getElementById('log-content'), sumEl=document.getElementById('log-summary-inline');
-  if(!sessions||!sessions.length){el.innerHTML='<div class="empty-panel">暂无 Session 记录</div>';if(sumEl)sumEl.textContent='';return;}
-  if(sumEl)sumEl.innerHTML=`<span style="color:var(--t2)">${sessions.length} 条</span>`;
+  if(!sessions||!sessions.length){
+    el.innerHTML='<div class="empty-panel">暂无记录<br><span style="font-size:12px;color:var(--t3)">执行 AI Session 后自动记录</span></div>';
+    if(sumEl)sumEl.textContent=''; return;
+  }
+
+  // Chinese labels for session keys
+  const SESSION_CN={'premarket':'盘前分析','opening':'黄金入场','mid':'中盘复盘','closing':'收尾'};
+  const AI_CN={'grok':'Grok','claude':'Claude','deepseek':'DeepSeek'};
+  const REGIME_CN={'Trend':'趋势','Chop':'震荡','Transition':'过渡'};
+
+  // Summary line
+  const totalParsed   = sessions.reduce((s,x)=>s+(x.decisions_parsed||0),0);
+  const totalExecuted = sessions.reduce((s,x)=>s+(x.decisions_executed||0),0);
+  if(sumEl)sumEl.innerHTML=`
+    <span style="color:var(--t2)">${sessions.length} 条记录</span>
+    <span style="margin-left:8px;font-size:11px;color:var(--green)">执行 ${totalExecuted} 笔</span>
+    <span style="margin-left:6px;font-size:11px;color:var(--t3)">解析 ${totalParsed} 个决策</span>`;
+
   el.innerHTML=sessions.map(s=>{
     const rc=s.regime==='Trend'?'var(--green)':s.regime==='Chop'?'var(--red)':'var(--amber)';
-    const exHtml=(s.executed||[]).map(e=>`<div style="font-size:12px;color:${e.startsWith('✅')?'var(--green)':e.startsWith('⚠️')?'var(--amber)':'var(--t2)'};">${esc(e)}</div>`).join('');
+    const sessionCN = SESSION_CN[s.session] || s.session || '';
+    const aiCN      = AI_CN[s.ai_provider] || s.ai_provider || '';
+    const regimeCN  = REGIME_CN[s.regime]  || s.regime || '';
+    const nav       = s.portfolio_snapshot ? s.portfolio_snapshot.total_value : null;
+    const cash      = s.portfolio_snapshot ? s.portfolio_snapshot.cash        : null;
+
+    // Execution lines (✅ / ⚠️)
+    const exHtml=(s.executed||[]).map(e=>`
+      <div style="font-size:12px;padding:3px 0;color:${e.startsWith('✅')?'var(--green)':e.startsWith('⚠️')?'var(--amber)':'var(--t2)'};">
+        ${esc(e)}
+      </div>`).join('');
+
+    // exec_log detail (skipped / blocked / no_decisions)
+    const skipLines=(s.exec_log||[]).filter(e=>e.status==='skipped'||e.status==='parse_ok_but_not_executed'||e.status==='no_decisions_parsed');
+    const skipHtml=skipLines.map(e=>`
+      <div style="font-size:11px;padding:2px 6px;margin-top:3px;background:var(--amber-l);border-radius:4px;color:var(--t2)">
+        ⚠️ ${esc(e.detail||'')}
+      </div>`).join('');
+
+    // Holdings snapshot
+    const holdSnap=(s.portfolio_snapshot&&s.portfolio_snapshot.holdings||[]).map(h=>
+      `<span style="background:var(--blue-l);color:var(--blue);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600">${h.symbol} x${h.shares}</span>`
+    ).join(' ');
+
     return`<div class="section-card" style="margin-bottom:10px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-        <span style="font-size:13px;font-weight:700">${s.date||''}</span>
-        <span style="font-size:12px;background:var(--bg);padding:2px 8px;border-radius:4px;color:var(--t2)">${s.session||''}</span>
-        <span style="font-size:11px;background:var(--bg);padding:2px 8px;border-radius:4px;color:var(--t3)">${s.ai_provider||''}</span>
-        ${s.regime?`<span style="font-size:11px;font-weight:600;color:${rc}">${s.regime}</span>`:''}
-        ${s.portfolio_snapshot?`<span style="margin-left:auto;font-size:12px;color:var(--t2)">净值 $${(s.portfolio_snapshot.total_value||0).toFixed(2)}</span>`:''}
+      <!-- Header row -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:13px;font-weight:700;color:var(--t)">${s.date||''}</span>
+        <span style="font-size:12px;font-weight:600;background:var(--blue-l);color:var(--blue);padding:2px 9px;border-radius:4px">${sessionCN}</span>
+        <span style="font-size:11px;color:var(--t3)">${aiCN}</span>
+        ${s.regime?`<span style="font-size:11px;font-weight:600;color:${rc}">${regimeCN}</span>`:''}
+        <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          ${nav!=null?`<span style="font-size:12px;color:var(--t2)">净值 <strong>$${nav.toFixed(2)}</strong></span>`:''}
+          ${cash!=null?`<span style="font-size:11px;color:var(--t3)">现金 $${cash.toFixed(2)}</span>`:''}
+        </div>
       </div>
-      ${exHtml?`<div style="display:flex;flex-direction:column;gap:3px;margin-bottom:8px">${exHtml}</div>`:''}
-      ${s.ai_analysis?`<details><summary style="font-size:12px;color:var(--blue);cursor:pointer;margin-top:4px">查看 AI 分析全文 ▾</summary><pre style="font-size:12px;color:var(--t);line-height:1.6;white-space:pre-wrap;margin-top:8px;background:var(--bg);padding:10px;border-radius:6px">${esc(s.ai_analysis)}</pre></details>`:''}
+
+      <!-- Parsed / executed counts -->
+      <div style="display:flex;gap:10px;margin-bottom:8px;font-size:11px">
+        <span style="color:var(--t3)">解析决策 <strong style="color:var(--t)">${s.decisions_parsed||0}</strong> 个</span>
+        <span style="color:var(--t3)">成功执行 <strong style="color:${(s.decisions_executed||0)>0?'var(--green)':'var(--t)'}">${s.decisions_executed||0}</strong> 笔</span>
+        ${holdSnap?`<span style="color:var(--t3)">持仓: ${holdSnap}</span>`:''}
+      </div>
+
+      <!-- Execution results -->
+      ${exHtml?`<div style="display:flex;flex-direction:column;gap:2px;margin-bottom:6px">${exHtml}</div>`:''}
+
+      <!-- Skipped / blocked reasons -->
+      ${skipHtml?`<div style="margin-bottom:6px">${skipHtml}</div>`:''}
+
+      <!-- AI analysis full text -->
+      ${s.ai_analysis?`<details>
+        <summary style="font-size:12px;color:var(--blue);cursor:pointer;margin-top:4px;user-select:none">
+          查看完整 AI 分析 ▾
+        </summary>
+        <pre style="font-size:12px;color:var(--t);line-height:1.65;white-space:pre-wrap;margin-top:8px;background:var(--bg);padding:10px 12px;border-radius:6px;overflow-x:auto">${esc(s.ai_analysis)}</pre>
+      </details>`:''}
     </div>`;
   }).join('');
 }
@@ -964,9 +1026,11 @@ async function loadLogFiles(){
 //  INIT
 // ═══════════════════════════════════════════════════════════════
 (async function init(){
-  // Set default log date range
+  // Set default log date range: last 30 days so recent trades are always visible
   const today=getNYDate();
-  document.getElementById('log-from').value=today.slice(0,7)+'-01';
+  const d30=new Date(new Date().setDate(new Date().getDate()-30));
+  const from30=d30.getFullYear()+'-'+String(d30.getMonth()+1).padStart(2,'0')+'-'+String(d30.getDate()).padStart(2,'0');
+  document.getElementById('log-from').value=from30;
   document.getElementById('log-to').value=today;
 
   // Load watchlist
