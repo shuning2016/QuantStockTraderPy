@@ -613,7 +613,11 @@ def execute_decisions(decisions: list, state: dict, session: str,
     for d in decisions:
         action, sym, shares, reason = d["action"], d["symbol"], d["shares"], d["reason"]
         conf = d.get("confidence", 0)
-        if action == "HOLD" or not sym:
+        if action == "HOLD":
+            label = f" {sym}" if sym else ""
+            executed.append(f"✅ HOLD{label} — {reason[:80]}")
+            continue
+        if not sym:
             continue
 
         tk = tkey(sym)
