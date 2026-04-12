@@ -657,6 +657,38 @@ function switchTradeAI(ai){
   loadTradeStateLocal(ai); renderTradePanel(); refreshQuantMetrics(ai);
 }
 
+async function loadCronStatus(){
+  try{
+    const r=await fetch('/api/cron/status');
+    const j=await r.json();
+    if(!j.ok)return;
+    const wrap=document.getElementById('cron-status-wrap');
+    if(!wrap)return;
+    const SCN={premarket:'盘前',opening:'黄金入场',mid:'中盘复盘',closing:'收尾'};
+    const ALB={grok:'🤖 Grok',claude:'✦ Claude',deepseek:'🔵 DeepSeek'};
+    const rows=Object.entries(j.status).map(([ai,s])=>{
+      const label=ALB[ai]||ai;
+      if(!s.last_run)return`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;border-bottom:1px dashed var(--bdr)"><span style="min-width:90px;font-weight:600">${label}</span><span style="color:var(--t3)">尚未运行</span></div>`;
+      const dt=new Date(s.last_run);
+      const ts=dt.toLocaleString('zh-CN',{timeZone:'Asia/Singapore',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+      const rc=s.regime==='Trend'?'var(--green)':s.regime==='Chop'?'var(--red)':'var(--amber)';
+      return`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;border-bottom:1px dashed var(--bdr);flex-wrap:wrap">
+        <span style="min-width:90px;font-weight:600">${label}</span>
+        <span style="background:var(--blue-l);color:var(--blue);padding:1px 6px;border-radius:3px">${SCN[s.last_session]||s.last_session||''}</span>
+        <span style="color:var(--t3)">${ts} SGT</span>
+        <span style="color:${rc};font-weight:600">${s.regime||''}</span>
+        <span style="color:var(--green)">${s.decisions_exec||0} 笔成交</span>
+      </div>`;
+    }).join('');
+    const sched=Object.entries(j.schedule_utc||{}).map(([s,t])=>`${SCN[s]||s}: ${t}`).join(' &nbsp;·&nbsp; ');
+    wrap.innerHTML=`<div style="background:var(--bg);border-radius:8px;padding:10px 12px">
+      <div style="font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">⏱ Cron 最近运行</div>
+      ${rows}
+      <div style="font-size:10px;color:var(--t3);margin-top:6px">${sched}</div>
+    </div>`;
+  }catch(e){}
+}
+
 async function initTradePanel(){
   // Step 1: show localStorage state immediately (no latency)
   loadTradeStateLocal(currentTradeAI);
@@ -667,6 +699,8 @@ async function initTradePanel(){
   renderTradePanel();
   // Step 3: fetch quant metrics from backend (computed server-side)
   await refreshQuantMetrics(currentTradeAI);
+  // Step 4: show cron last-run status
+  await loadCronStatus();
 }
 async function refreshTradePanel(){
   await syncFromBackend(currentTradeAI);
@@ -757,8 +791,9 @@ function renderTradePanel(){
       </button>`).join('')}
     </div>
     <div style="margin-top:10px;font-size:11px;color:var(--t3)">
-      盘前(9:15)→ 黄金入场(10:00)→ 中盘复盘(12:00)→ 收尾(15:30) 美东时间
+      盘前(9:15 ET)→ 黄金入场(10:00 ET)→ 中盘复盘(12:00 ET)→ 收尾(15:30 ET) &nbsp;·&nbsp; <strong style="color:var(--green)">Vercel Cron 已启用</strong> — 每个工作日自动执行
     </div>
+    <div id="cron-status-wrap" style="margin-top:10px"></div>
   </div>`;
 
   // ── Holdings ──

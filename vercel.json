@@ -11,5 +11,22 @@
       "src": "/(.*)",
       "dest": "app.py"
     }
+  ],
+  "crons": [
+    { "path": "/api/cron/premarket/grok",     "schedule": "15 13 * * 1-5" },
+    { "path": "/api/cron/premarket/claude",   "schedule": "15 13 * * 1-5" },
+    { "path": "/api/cron/premarket/deepseek", "schedule": "15 13 * * 1-5" },
+
+    { "path": "/api/cron/opening/grok",       "schedule": "0 14 * * 1-5" },
+    { "path": "/api/cron/opening/claude",     "schedule": "2 14 * * 1-5" },
+    { "path": "/api/cron/opening/deepseek",   "schedule": "4 14 * * 1-5" },
+
+    { "path": "/api/cron/mid/grok",           "schedule": "0 16 * * 1-5" },
+    { "path": "/api/cron/mid/claude",         "schedule": "2 16 * * 1-5" },
+    { "path": "/api/cron/mid/deepseek",       "schedule": "4 16 * * 1-5" },
+
+    { "path": "/api/cron/closing/grok",       "schedule": "30 19 * * 1-5" },
+    { "path": "/api/cron/closing/claude",     "schedule": "32 19 * * 1-5" },
+    { "path": "/api/cron/closing/deepseek",   "schedule": "34 19 * * 1-5" }
   ]
 }

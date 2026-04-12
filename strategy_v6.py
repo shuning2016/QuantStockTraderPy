@@ -321,7 +321,10 @@ def parse_ai_decisions(ai_text):
             if rest:
                 block_lines.append(rest)
         elif in_block:
-            stripped = line.strip().lstrip("*-\u2013 ")
+            stripped = line.strip()
+            # Strip leading list/bullet markers: *, -, –, •, ▸, ▹, →, ①②③, "1. ", "2) "
+            stripped = _re.sub(r"^[\*\-\u2013\u2022\u25b8\u25b9\u2192\u2460-\u2473]+\s*", "", stripped)
+            stripped = _re.sub(r"^\d+[\.\)]\s*", "", stripped)  # "1. " or "1) "
             if stripped == "":
                 if block_lines:
                     break
@@ -339,6 +342,16 @@ def parse_ai_decisions(ai_text):
                 "symbol":     m.group(2).upper(),
                 "shares":     int(m.group(3)),
                 "reason":     m.group(4).strip(),
+                "parse_mode": "structured",
+            })
+            continue
+        # Handle bare "HOLD" line (AI omits pipes when no positions to manage)
+        if _re.match(r"^HOLD\s*$", raw, _re.IGNORECASE):
+            decisions.append({
+                "action":     "HOLD",
+                "symbol":     "",
+                "shares":     0,
+                "reason":     "no_action",
                 "parse_mode": "structured",
             })
 

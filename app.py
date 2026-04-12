@@ -654,6 +654,113 @@ def index():
     return Response(html_path.read_text(encoding="utf-8"),
                     mimetype="text/html")
 
+
+# ─── Cron job routes (Vercel Cron) ───────────────────────────────
+# Vercel calls these GET endpoints on the schedule in vercel.json.
+# Each session runs for all 3 AI providers (staggered 2 min apart).
+#
+# Schedule (UTC, EDT = UTC-4):
+#   premarket  9:15 ET  = 13:15 UTC  (Mon-Fri)
+#   opening   10:00 ET  = 14:00 UTC  (Mon-Fri)
+#   mid       12:00 ET  = 16:00 UTC  (Mon-Fri)
+#   closing   15:30 ET  = 19:30 UTC  (Mon-Fri)
+#
+# Note: During EST (winter, UTC-5) sessions run 1 hour late.
+# To fix: update schedules in vercel.json to +1 hour in Nov-Mar.
+
+_VALID_SESSIONS  = {"premarket", "opening", "mid", "closing"}
+_VALID_PROVIDERS = {"grok", "claude", "deepseek"}
+_CRON_SECRET     = os.environ.get("CRON_SECRET", "")  # optional auth
+
+
+def _verify_cron(req) -> bool:
+    """
+    Verify the request is from Vercel's cron runner.
+    Vercel sends the Authorization header when CRON_SECRET is set
+    in environment variables. If CRON_SECRET is empty, allow all
+    (useful for manual testing via curl).
+    """
+    if not _CRON_SECRET:
+        return True
+    auth = req.headers.get("Authorization", "")
+    return auth == f"Bearer {_CRON_SECRET}"
+
+
+@app.route("/api/cron/<session>/<provider>", methods=["GET"])
+def cron_run(session, provider):
+    """Called by Vercel Cron. Runs one trading session for one AI provider."""
+    if not _verify_cron(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if session not in _VALID_SESSIONS:
+        return jsonify({"error": f"Unknown session: {session}"}), 400
+    if provider not in _VALID_PROVIDERS:
+        return jsonify({"error": f"Unknown provider: {provider}"}), 400
+
+    _logging.getLogger("quant.cron").info(
+        "Cron triggered: session=%s provider=%s", session, provider)
+
+    try:
+        result = run_trade_session(session, provider)
+        executed_count = sum(
+            1 for e in (result.get("exec_log") or [])
+            if e.get("status") == "executed"
+        )
+        _logging.getLogger("quant.cron").info(
+            "Cron complete: session=%s provider=%s executed=%d",
+            session, provider, executed_count)
+        return jsonify({
+            "ok":       True,
+            "session":  session,
+            "provider": provider,
+            "executed": result.get("executed", []),
+            "decisions_parsed":   result.get("decisions_parsed", 0),
+            "decisions_executed": result.get("decisions_executed", 0),
+        })
+    except Exception as e:
+        _logging.getLogger("quant.cron").error(
+            "Cron error: session=%s provider=%s error=%s", session, provider, e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/cron/status", methods=["GET"])
+def cron_status():
+    """
+    Returns the last run time for each session/provider combination.
+    Frontend polls this to show the trigger status panel.
+    """
+    if not _verify_cron(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    status = {}
+    for provider in _VALID_PROVIDERS:
+        try:
+            # Read the most recent session log entry for this provider
+            today = today_et()
+            from_date = (datetime.now(_ET) - __import__('datetime').timedelta(days=2)).strftime("%Y-%m-%d")
+            sessions = read_log_range("sessions", from_date, today, provider)
+            if sessions:
+                last = sessions[0]  # already sorted newest-first
+                status[provider] = {
+                    "last_session":   last.get("session"),
+                    "last_run":       last.get("timestamp"),
+                    "last_date":      last.get("date"),
+                    "decisions_exec": last.get("decisions_executed", 0),
+                    "regime":         last.get("regime", "Unknown"),
+                }
+            else:
+                status[provider] = {"last_run": None}
+        except Exception:
+            status[provider] = {"last_run": None}
+
+    return jsonify({"ok": True, "status": status,
+                    "schedule_utc": {
+                        "premarket": "13:15 UTC (9:15 ET EDT)",
+                        "opening":   "14:00 UTC (10:00 ET EDT)",
+                        "mid":       "16:00 UTC (12:00 ET EDT)",
+                        "closing":   "19:30 UTC (15:30 ET EDT)",
+                    }})
+
 @app.route("/api", methods=["POST"])
 def api():
     data   = request.get_json(force=True)
