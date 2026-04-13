@@ -298,10 +298,12 @@ def check_operating_rules(state: dict) -> dict:
 def parse_ai_decisions(ai_text):
     """
     Parse DECISION block from AI text. Handles:
-      1. Standard pipe format:  BUY|SYM|N|reason
-      2. Markdown bold:         **DECISION:** BUY|SYM|N|reason
-      3. Prose fallback:        AI writes "决定入场AAPL" / "buy AAPL" in natural language
-                                instead of the structured format — we extract intent.
+      1. Standard pipe format:   BUY|SYM|N|reason
+      2. Spaces around pipes:    BUY | SYM | N | reason
+      3. Markdown bold action:   **BUY**|SYM|N|reason
+      4. Bold DECISION header:   **DECISION:** BUY|SYM|N|reason
+      5. Chinese header:         决策: BUY|SYM|N|reason
+      6. Prose fallback:         AI writes "决定入场AAPL" / "buy AAPL" in natural language
 
     Returns list of {action, symbol, shares, reason, parse_mode}
     parse_mode: 'structured' | 'prose_fallback'
@@ -313,11 +315,15 @@ def parse_ai_decisions(ai_text):
     block_lines = []
     in_block = False
 
+    # Match both English "DECISION:" and Chinese "决策:"
+    _BLOCK_START = _re.compile(r"(?:DECISION|决策)\s*[:：]", _re.IGNORECASE)
+
     for line in ai_text.split("\n"):
-        if _re.search(r"DECISION\s*:", line, _re.IGNORECASE):
+        if _BLOCK_START.search(line):
             in_block = True
-            rest = _re.sub(r"\*{0,2}\s*DECISION\s*:\s*\*{0,2}", "", line,
-                           flags=_re.IGNORECASE).strip()
+            rest = _BLOCK_START.sub("", line)
+            # Strip surrounding markdown bold markers
+            rest = _re.sub(r"\*{1,2}", "", rest).strip()
             if rest:
                 block_lines.append(rest)
         elif in_block:
@@ -332,21 +338,25 @@ def parse_ai_decisions(ai_text):
                 block_lines.append(stripped)
 
     for raw in block_lines:
+        # Normalise: strip bold markers (**...**) and spaces around pipes
+        normalised = _re.sub(r"\*{1,2}", "", raw)
+        normalised = _re.sub(r"\s*\|\s*", "|", normalised).strip()
         m = _re.match(
-            r"(BUY|SELL|HOLD)\|([A-Z0-9.]{0,12})\|(\d+)\|(.+)",
-            raw, _re.IGNORECASE
+            r"(BUY|SELL|HOLD)\|([A-Z0-9.]{0,12})\|(\d*)\|?(.*)",
+            normalised, _re.IGNORECASE
         )
         if m:
+            shares_str = m.group(3)
             decisions.append({
                 "action":     m.group(1).upper(),
                 "symbol":     m.group(2).upper(),
-                "shares":     int(m.group(3)),
+                "shares":     int(shares_str) if shares_str.isdigit() else 0,
                 "reason":     m.group(4).strip(),
                 "parse_mode": "structured",
             })
             continue
         # Handle bare "HOLD" line (AI omits pipes when no positions to manage)
-        if _re.match(r"^HOLD\s*$", raw, _re.IGNORECASE):
+        if _re.match(r"^HOLD\s*$", normalised, _re.IGNORECASE):
             decisions.append({
                 "action":     "HOLD",
                 "symbol":     "",
@@ -631,8 +641,11 @@ def execute_decisions(decisions: list, state: dict, session: str,
         if action == "BUY":
             if session == "closing":
                 executed.append(f"⚠️ {sym} 收尾禁止新开仓"); continue
-            atr    = atr_estimates.get(sym, price * 0.02)
             regime = state.get("currentRegime", "Trend")
+            min_conf = CFG.SCORE_MIN_TRANSITION if regime == "Transition" else CFG.SCORE_MIN_NORMAL
+            if conf < min_conf:
+                executed.append(f"⚠️ {sym} 置信度C:{conf}<{min_conf}，跳过"); continue
+            atr    = atr_estimates.get(sym, price * 0.02)
             sizing = calc_position_size(calc_nav(state), price, atr, regime)
             shares = min(shares, sizing["shares"]) if shares > 0 else sizing["shares"]
             rule   = check_position_rules(state, sym, shares, price)

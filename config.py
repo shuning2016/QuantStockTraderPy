@@ -62,7 +62,7 @@ MODELS = {
     },
 }
 
-MAX_TOKENS = 1500   # max tokens for every AI call
+MAX_TOKENS = 2000   # max tokens for every AI call
 
 # ── Data feed URLs ────────────────────────────────────────────────
 FINNHUB_QUOTE_URL   = "https://finnhub.io/api/v1/quote"
