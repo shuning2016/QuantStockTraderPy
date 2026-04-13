@@ -762,10 +762,11 @@ def cron_status():
                     }})
 
 @app.route("/api", methods=["POST"])
+@app.route("/claude-api", methods=["POST"])
 def api():
-    data   = request.get_json(force=True)
-    action = data.get("action", "")
     try:
+        data   = request.get_json(force=True) or {}
+        action = data.get("action", "")
         result = dispatch(action, data)
         return jsonify({"ok": True, "data": result})
     except Exception as e:
