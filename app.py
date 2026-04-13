@@ -101,27 +101,31 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 # ─── Vercel KV / Upstash Redis — persistent storage ──────────────
 # Vercel's /tmp is ephemeral: each serverless invocation may get a
 # fresh container, so cron-written logs are invisible to UI requests.
-# Solution: use Vercel KV (Upstash Redis) for all log + state data.
+# Solution: use Upstash Redis (via Vercel Marketplace) for persistent log + state storage.
 #
 # Setup (one-time):
-#   1. Vercel Dashboard → Storage → Create KV Database
+#   1. Vercel Dashboard → Storage → Upstash → Create Redis database (free tier)
 #   2. Connect it to this project — env vars are injected automatically:
-#      KV_REST_API_URL, KV_REST_API_TOKEN
-#   Hobby plan is free and sufficient for this workload.
+#      UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+#   Also supports legacy Vercel KV env vars: KV_REST_API_URL / KV_REST_API_TOKEN
 #
-# Without KV, the app falls back to /tmp (fine for local dev, broken on Vercel cron).
+# Without Redis, the app falls back to /tmp (fine for local dev, broken on Vercel cron).
 
-_KV_URL   = os.environ.get("KV_REST_API_URL", "")
-_KV_TOKEN = os.environ.get("KV_REST_API_TOKEN", "")
+# Accept either Upstash-native env vars (new) or Vercel KV env vars (legacy)
+_KV_URL   = (os.environ.get("UPSTASH_REDIS_REST_URL")
+             or os.environ.get("KV_REST_API_URL", ""))
+_KV_TOKEN = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+             or os.environ.get("KV_REST_API_TOKEN", ""))
 _USE_KV   = bool(_KV_URL and _KV_TOKEN)
 _log_kv   = _logging.getLogger("quant.kv")
 
 if _USE_KV:
-    _log_kv.info("KV storage enabled (%s)", _KV_URL[:50])
+    _log_kv.info("Redis/KV storage enabled (%s)", _KV_URL[:60])
 else:
     _log_kv.warning(
-        "KV_REST_API_URL / KV_REST_API_TOKEN not set — using /tmp (ephemeral on Vercel). "
-        "Cron-written logs will NOT be visible in the UI. See README for Vercel KV setup."
+        "UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set — using /tmp (ephemeral on Vercel). "
+        "Cron-written logs will NOT be visible in the UI. "
+        "Fix: Vercel Dashboard → Storage → Upstash → Create Redis → Connect project."
     )
 
 def _kv(cmd: list):

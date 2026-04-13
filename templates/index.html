@@ -301,8 +301,8 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
     <!-- Log panel -->
     <div id="panel-messages" style="display:none">
       <div id="kv-warning" style="display:none;background:#fff3cd;color:#856404;padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:8px;line-height:1.5">
-        ⚠️ <strong>日志无法持久化</strong> — Vercel KV 未配置。Cron 触发的交易记录存储在 /tmp（每次冷启动清空），UI 无法读取。<br>
-        请在 Vercel Dashboard → Storage → 创建 KV 数据库并关联此项目，自动注入 <code>KV_REST_API_URL</code> 和 <code>KV_REST_API_TOKEN</code> 环境变量。
+        ⚠️ <strong>日志无法持久化</strong> — Upstash Redis 未配置。Cron 触发的交易记录存储在 /tmp（每次冷启动清空），UI 无法读取。<br>
+        请在 <strong>Vercel Dashboard → Storage → Upstash → 创建 Redis 数据库（免费）→ Connect Project</strong>，系统自动注入 <code>UPSTASH_REDIS_REST_URL</code> 和 <code>UPSTASH_REDIS_REST_TOKEN</code> 环境变量。
       </div>
       <div class="log-tab-row">
         <button class="log-tab-btn active" id="ltab-sessions" onclick="switchLogTab('sessions')">📊 全部记录</button>
