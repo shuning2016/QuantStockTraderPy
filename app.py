@@ -98,6 +98,55 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 STATE_DIR      = DATA_DIR / "trade_states"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
+# ─── Vercel KV / Upstash Redis — persistent storage ──────────────
+# Vercel's /tmp is ephemeral: each serverless invocation may get a
+# fresh container, so cron-written logs are invisible to UI requests.
+# Solution: use Vercel KV (Upstash Redis) for all log + state data.
+#
+# Setup (one-time):
+#   1. Vercel Dashboard → Storage → Create KV Database
+#   2. Connect it to this project — env vars are injected automatically:
+#      KV_REST_API_URL, KV_REST_API_TOKEN
+#   Hobby plan is free and sufficient for this workload.
+#
+# Without KV, the app falls back to /tmp (fine for local dev, broken on Vercel cron).
+
+_KV_URL   = os.environ.get("KV_REST_API_URL", "")
+_KV_TOKEN = os.environ.get("KV_REST_API_TOKEN", "")
+_USE_KV   = bool(_KV_URL and _KV_TOKEN)
+_log_kv   = _logging.getLogger("quant.kv")
+
+if _USE_KV:
+    _log_kv.info("KV storage enabled (%s)", _KV_URL[:50])
+else:
+    _log_kv.warning(
+        "KV_REST_API_URL / KV_REST_API_TOKEN not set — using /tmp (ephemeral on Vercel). "
+        "Cron-written logs will NOT be visible in the UI. See README for Vercel KV setup."
+    )
+
+def _kv(cmd: list):
+    """Execute one Redis command via Upstash REST API. Returns result or None on error."""
+    try:
+        resp = requests.post(
+            _KV_URL,
+            headers={"Authorization": f"Bearer {_KV_TOKEN}"},
+            json=cmd,
+            timeout=8,
+        )
+        resp.raise_for_status()
+        return resp.json().get("result")
+    except Exception as e:
+        _log_kv.error("KV command %s failed: %s", cmd[0] if cmd else "?", e)
+        return None
+
+def _next_ym(ym: str) -> str:
+    """Increment a YYYY-MM string by one month."""
+    y, m = int(ym[:4]), int(ym[5:7])
+    m += 1
+    if m > 12:
+        m, y = 1, y + 1
+    return f"{y:04d}-{m:02d}"
+
 def load_watchlist():
     # Priority 1: local file (works locally and persists across restarts)
     if WATCHLIST_FILE.exists():
@@ -136,7 +185,28 @@ def save_watchlist(stocks):
 def _state_file(provider: str) -> Path:
     return STATE_DIR / f"state_{provider}.json"
 
+def _json_safe(obj):
+    """Serialize non-JSON types cleanly (no silent str() coercion)."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+# ─── Trade state ──────────────────────────────────────────────────
 def load_trade_state(provider: str) -> dict:
+    if _USE_KV:
+        data = _kv(["GET", f"tradestate:{provider}"])
+        if data:
+            try:
+                raw = json.loads(data)
+                if isinstance(raw, dict):
+                    return raw
+            except Exception as e:
+                _log_kv.error("KV state parse error for %s: %s", provider, e)
+        return new_trade_state()
+
+    # ── Filesystem fallback (local dev) ──
     f = _state_file(provider)
     if f.exists():
         try:
@@ -144,9 +214,7 @@ def load_trade_state(provider: str) -> dict:
             if not isinstance(raw, dict):
                 raise ValueError(f"State file for {provider} is not a dict")
             state = raw
-            # If state.log is empty but JSONL trade log has records,
-            # rebuild state.log from the persistent JSONL file so the
-            # trade panel shows history even after a Vercel cold start.
+            # Rebuild state.log from JSONL on cold start if log is empty
             if not state.get("log"):
                 today = today_et()
                 month = today[:7] if today else ""
@@ -164,23 +232,19 @@ def load_trade_state(provider: str) -> dict:
             _logging.getLogger(__name__).error("Could not load state for %s: %s", provider, e)
     return new_trade_state()
 
-def _json_safe(obj):
-    """Serialize non-JSON types cleanly (no silent str() coercion)."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, Path):
-        return str(obj)
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
 def save_trade_state(provider: str, state: dict):
-    _state_file(provider).write_text(json.dumps(state, default=_json_safe))
+    state_json = json.dumps(state, default=_json_safe)
+    if _USE_KV:
+        _kv(["SET", f"tradestate:{provider}", state_json])
+        return
+    _state_file(provider).write_text(state_json)
 
 def reset_trade_state(provider: str) -> dict:
     s = new_trade_state()
     save_trade_state(provider, s)
     return s
 
-# ─── Drive-equivalent: JSONL log files ───────────────────────────
+# ─── Log files (JSONL) ────────────────────────────────────────────
 def _month_log_path(prefix: str, date_str: str = None) -> Path:
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m")
@@ -189,12 +253,37 @@ def _month_log_path(prefix: str, date_str: str = None) -> Path:
     return LOGS_DIR / f"{prefix}_{date_str}.jsonl"
 
 def append_log(prefix: str, entry: dict, date_str: str = None):
+    entry_str = json.dumps(entry, default=_json_safe)
+    if _USE_KV:
+        ym = (date_str[:7] if date_str else datetime.now().strftime("%Y-%m"))
+        _kv(["RPUSH", f"log:{prefix}:{ym}", entry_str])
+        return
     path = _month_log_path(prefix, date_str)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, default=_json_safe) + "\n")
+        f.write(entry_str + "\n")
 
 def read_log_range(prefix: str, from_date: str, to_date: str,
                    ai_provider: str = None) -> list:
+    if _USE_KV:
+        from_ym, to_ym = from_date[:7], to_date[:7]
+        results = []
+        ym = from_ym
+        while ym <= to_ym:
+            items = _kv(["LRANGE", f"log:{prefix}:{ym}", "0", "-1"]) or []
+            for item in items:
+                try:
+                    r = json.loads(item)
+                    if r.get("date", "") < from_date or r.get("date", "") > to_date:
+                        continue
+                    if ai_provider and r.get("ai_provider") != ai_provider:
+                        continue
+                    results.append(r)
+                except Exception:
+                    pass
+            ym = _next_ym(ym)
+        return sorted(results, key=lambda x: x.get("timestamp", ""), reverse=True)
+
+    # ── Filesystem fallback (local dev) ──
     from_ym = from_date[:7]
     to_ym   = to_date[:7]
     results = []
@@ -215,6 +304,8 @@ def read_log_range(prefix: str, from_date: str, to_date: str,
     return sorted(results, key=lambda x: x.get("timestamp", ""), reverse=True)
 
 def list_log_files() -> list:
+    if _USE_KV:
+        return []  # File download not supported via KV; Sessions/Trades tabs work fine
     files = []
     for f in sorted(LOGS_DIR.glob("*.jsonl")):
         stat = f.stat()
@@ -760,6 +851,17 @@ def cron_status():
                         "mid":       "16:00 UTC (12:00 ET EDT)",
                         "closing":   "19:30 UTC (15:30 ET EDT)",
                     }})
+
+@app.route("/api/kv-status", methods=["GET"])
+def kv_status():
+    """Check KV connectivity — used by the UI to warn if logs won't persist."""
+    if not _USE_KV:
+        return jsonify({"ok": False, "kv": False,
+                        "message": "KV not configured. Logs stored in /tmp (ephemeral on Vercel)."})
+    ping = _kv(["PING"])
+    ok = (ping == "PONG")
+    return jsonify({"ok": ok, "kv": ok,
+                    "message": "KV connected" if ok else "KV configured but ping failed"})
 
 @app.route("/api", methods=["POST"])
 @app.route("/claude-api", methods=["POST"])
