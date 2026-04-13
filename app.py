@@ -117,10 +117,10 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 # Legacy Vercel KV (deprecated) used:     KV_REST_API_URL       + KV_REST_API_TOKEN
 _KV_URL   = (os.environ.get("UPSTASH_REDIS_REST_URL")
              or os.environ.get("UPSTASH_REDIS_URL")
-             or os.environ.get("KV_REST_API_URL", ""))
+             or os.environ.get("KV_REST_API_URL", "")).strip()
 _KV_TOKEN = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
              or os.environ.get("UPSTASH_REDIS_TOKEN")
-             or os.environ.get("KV_REST_API_TOKEN", ""))
+             or os.environ.get("KV_REST_API_TOKEN", "")).strip()
 _USE_KV   = bool(_KV_URL and _KV_TOKEN)
 _log_kv   = _logging.getLogger("quant.kv")
 
