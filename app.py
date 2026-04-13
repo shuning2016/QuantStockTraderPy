@@ -111,21 +111,37 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 #
 # Without Redis, the app falls back to /tmp (fine for local dev, broken on Vercel cron).
 
-# Accept either Upstash-native env vars (new) or Vercel KV env vars (legacy)
+# Accept all known Upstash / Vercel KV env var naming variants.
+# Upstash via Vercel Marketplace injects: UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
+# Upstash direct SDK may use:             UPSTASH_REDIS_URL     + UPSTASH_REDIS_TOKEN
+# Legacy Vercel KV (deprecated) used:     KV_REST_API_URL       + KV_REST_API_TOKEN
 _KV_URL   = (os.environ.get("UPSTASH_REDIS_REST_URL")
+             or os.environ.get("UPSTASH_REDIS_URL")
              or os.environ.get("KV_REST_API_URL", ""))
 _KV_TOKEN = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+             or os.environ.get("UPSTASH_REDIS_TOKEN")
              or os.environ.get("KV_REST_API_TOKEN", ""))
 _USE_KV   = bool(_KV_URL and _KV_TOKEN)
 _log_kv   = _logging.getLogger("quant.kv")
+
+# Log which env vars were detected to help diagnose misconfiguration
+_KV_CANDIDATES = {
+    "UPSTASH_REDIS_REST_URL":   bool(os.environ.get("UPSTASH_REDIS_REST_URL")),
+    "UPSTASH_REDIS_REST_TOKEN": bool(os.environ.get("UPSTASH_REDIS_REST_TOKEN")),
+    "UPSTASH_REDIS_URL":        bool(os.environ.get("UPSTASH_REDIS_URL")),
+    "UPSTASH_REDIS_TOKEN":      bool(os.environ.get("UPSTASH_REDIS_TOKEN")),
+    "KV_REST_API_URL":          bool(os.environ.get("KV_REST_API_URL")),
+    "KV_REST_API_TOKEN":        bool(os.environ.get("KV_REST_API_TOKEN")),
+}
 
 if _USE_KV:
     _log_kv.info("Redis/KV storage enabled (%s)", _KV_URL[:60])
 else:
     _log_kv.warning(
-        "UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set — using /tmp (ephemeral on Vercel). "
-        "Cron-written logs will NOT be visible in the UI. "
-        "Fix: Vercel Dashboard → Storage → Upstash → Create Redis → Connect project."
+        "No Redis env vars found — using /tmp (ephemeral on Vercel). "
+        "Env var scan: %s. "
+        "Fix: Vercel Dashboard → Storage → Upstash → Create Redis → Connect project.",
+        _KV_CANDIDATES
     )
 
 def _kv(cmd: list):
@@ -858,14 +874,21 @@ def cron_status():
 
 @app.route("/api/kv-status", methods=["GET"])
 def kv_status():
-    """Check KV connectivity — used by the UI to warn if logs won't persist."""
+    """Check KV/Redis connectivity — used by the UI to warn if logs won't persist."""
+    diag = {
+        "env_vars_found": _KV_CANDIDATES,
+        "url_resolved":   _KV_URL[:60] if _KV_URL else None,
+        "token_resolved": bool(_KV_TOKEN),
+    }
     if not _USE_KV:
         return jsonify({"ok": False, "kv": False,
-                        "message": "KV not configured. Logs stored in /tmp (ephemeral on Vercel)."})
+                        "message": "No Redis env vars detected.",
+                        "diag": diag})
     ping = _kv(["PING"])
     ok = (ping == "PONG")
     return jsonify({"ok": ok, "kv": ok,
-                    "message": "KV connected" if ok else "KV configured but ping failed"})
+                    "message": "Redis connected" if ok else "Redis env vars set but PING failed",
+                    "diag": diag})
 
 @app.route("/api", methods=["POST"])
 @app.route("/claude-api", methods=["POST"])
