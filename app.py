@@ -507,7 +507,12 @@ def call_claude(prompt: str) -> str:
             timeout=60,
         )
         data = r.json()
-        return data["content"][0]["text"] if data.get("content") else str(data)
+        if not r.ok or not data.get("content"):
+            err = data.get("error", {})
+            msg = err.get("message", str(data)) if isinstance(err, dict) else str(data)
+            _logging.getLogger("quant.ai").error("Claude API error: %s", data)
+            return f"[ERROR] Claude API: {msg}"
+        return data["content"][0]["text"]
     except Exception as e:
         return f"[ERROR] Claude: {e}"
 
