@@ -303,17 +303,22 @@ def parse_ai_decisions(ai_text):
       3. Markdown bold action:   **BUY**|SYM|N|reason
       4. Bold DECISION header:   **DECISION:** BUY|SYM|N|reason
       5. Chinese header:         决策: BUY|SYM|N|reason
-      6. Prose fallback:         AI writes "决定入场AAPL" / "buy AAPL" in natural language
+      6. Markdown code fence:    ```\\nDECISION:\\n...\\n```
+      7. Prose fallback:         AI writes "决定入场AAPL" / "buy AAPL" in natural language
 
     Returns list of {action, symbol, shares, reason, parse_mode}
     parse_mode: 'structured' | 'prose_fallback'
     """
     import re as _re
 
+    # Pre-process: strip markdown code fences so they don't pollute block lines
+    ai_text = _re.sub(r"```[a-zA-Z]*\n?", "", ai_text)
+
     # ── Pass 1: structured pipe format (preferred) ────────────────
     decisions = []
     block_lines = []
     in_block = False
+    blank_count = 0  # allow up to 1 blank line inside block before stopping
 
     # Match both English "DECISION:" and Chinese "决策:"
     _BLOCK_START = _re.compile(r"(?:DECISION|决策)\s*[:：]", _re.IGNORECASE)
@@ -321,6 +326,7 @@ def parse_ai_decisions(ai_text):
     for line in ai_text.split("\n"):
         if _BLOCK_START.search(line):
             in_block = True
+            blank_count = 0
             rest = _BLOCK_START.sub("", line)
             # Strip surrounding markdown bold markers
             rest = _re.sub(r"\*{1,2}", "", rest).strip()
@@ -332,9 +338,13 @@ def parse_ai_decisions(ai_text):
             stripped = _re.sub(r"^[\*\-\u2013\u2022\u25b8\u25b9\u2192\u2460-\u2473]+\s*", "", stripped)
             stripped = _re.sub(r"^\d+[\.\)]\s*", "", stripped)  # "1. " or "1) "
             if stripped == "":
-                if block_lines:
+                blank_count += 1
+                # Allow one blank line (e.g. between header and first decision row),
+                # but stop if we already have decisions and hit a second blank line.
+                if block_lines and blank_count > 1:
                     break
             else:
+                blank_count = 0
                 block_lines.append(stripped)
 
     for raw in block_lines:
