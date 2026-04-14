@@ -17,9 +17,9 @@ from typing import Optional
 class CFG:
     version              = "v6.0"
     INITIAL_CASH         = 10_000.0
-    MIN_CASH_RATIO       = 0.20
-    MAX_SINGLE_RATIO     = 0.04     # max 4% NAV per trade
-    MAX_HOLDINGS         = 5
+    MIN_CASH_RATIO       = 0.00
+    MAX_SINGLE_RATIO     = 0.10     # max 10% NAV per trade
+    MAX_HOLDINGS         = 8
     SINGLE_TRADE_RISK    = 0.01     # risk 1% NAV per trade
     ATR_PERIOD           = 14
     STOP_ATR_MULT        = 1.5
