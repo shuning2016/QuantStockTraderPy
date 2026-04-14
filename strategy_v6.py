@@ -38,7 +38,7 @@ class CFG:
     REGIME_ADX_TREND     = 25
     REGIME_ADX_CHOP      = 20
     REGIME_CONFIRM_DAYS  = 3
-    NO_TRADE_GAP_PCT     = 3.0
+    NO_TRADE_GAP_PCT     = 3.0   # reserved: skip buys on >3% gap-up (not yet enforced)
     EXEC_SLIPPAGE        = 0.002
     EXEC_COMMISSION      = 1.0
     FEEDBACK_MIN_TRADES  = 20
@@ -190,9 +190,29 @@ def check_auto_stop_rules(state: dict, session: str) -> list:
             sells.append({"sym": sym, "shares": h["shares"],
                           "reason": f"追踪止损${h['stopPrice']:.2f}（{unr:+.2f}R）", "tag": tag})
             continue
-        if pnl_pct <= -CFG.HARD_STOP_PCT:
+
+        # Layer 3B: skip hard stop during the first 30 min after entry to avoid
+        # being stopped out by normal open-session volatility on a fresh position.
+        now_et    = state.get("_nowET", "")
+        entry_et  = h.get("entryTime", "")
+        in_open_guard = False
+        if now_et and entry_et:
+            try:
+                nh, nm = int(now_et[:2]),   int(now_et[3:5])
+                eh, em = int(entry_et[:2]), int(entry_et[3:5])
+                mins_since = (nh * 60 + nm) - (eh * 60 + em)
+                in_open_guard = 0 <= mins_since <= 30
+            except Exception:
+                pass
+
+        # Layer 3C: ATR-relative hard stop floor — prevents the fixed 2% floor from
+        # firing before the intended ATR-based stop (e.g. ATR stop at 3.5% > 2%).
+        atr_stop_pct    = (risk_per / h["avgCost"]) * 100 if h["avgCost"] > 0 else CFG.HARD_STOP_PCT
+        dynamic_hard_stop = max(CFG.HARD_STOP_PCT, atr_stop_pct)
+
+        if not in_open_guard and pnl_pct <= -dynamic_hard_stop:
             sells.append({"sym": sym, "shares": h["shares"],
-                          "reason": f"硬止损-{CFG.HARD_STOP_PCT}%", "tag": "HARD_STOP"})
+                          "reason": f"硬止损-{dynamic_hard_stop:.1f}%", "tag": "HARD_STOP"})
             continue
         if pnl_pct >= CFG.HARD_PROFIT_PCT:
             sells.append({"sym": sym, "shares": h["shares"],
@@ -247,6 +267,14 @@ def get_quant_metrics(state: dict) -> dict:
     for d in sorted(state.get("dailyPnL", {}).keys()):
         cum += state["dailyPnL"][d]
         curve.append({"date": d, "totalValue": cum})
+    # Replace (or add) today's data point with the real mark-to-market NAV so
+    # the equity curve reflects unrealized gains, not just closed daily PnL.
+    today = datetime.now().strftime("%Y-%m-%d")
+    current_nav = round(calc_nav(state), 2)
+    if curve and curve[-1]["date"] == today:
+        curve[-1]["totalValue"] = current_nav
+    else:
+        curve.append({"date": today, "totalValue": current_nav})
     max_dd = calc_max_drawdown(curve)
     fb = check_feedback_trigger(state)
     return {
@@ -479,16 +507,27 @@ def parse_regime_from_text(ai_text: str) -> tuple:
     m = re.search(r'Regime\s*[:：]\s*(Trend|Chop|Transition)', ai_text, re.IGNORECASE)
     if m:
         regime = m.group(1).capitalize()
-    m_adx = re.search(r'ADX[^0-9]*(\d+\.?\d*)', ai_text, re.IGNORECASE)
+
+    # Bug-fix: require a separator (=/:/ /≈) *after* the optional "(14)" period label so
+    # "ADX(14)=28.5" captures 28.5 (not 14), and bare "ADX(14)" yields no match.
+    m_adx = re.search(
+        r'ADX\s*(?:\(\d+\))?\s*(?:[=:：≈]|\s)\s*(\d+\.?\d*)',
+        ai_text, re.IGNORECASE
+    )
     if m_adx:
         spy_adx = float(m_adx.group(1))
+
+    # Regime-override: Chop/Transition always force their synthetic ADX.
+    # For Trend: trust parsed ADX only when >= threshold — prevents a bad parse
+    # from silently downgrading a stated "Trend" to Chop inside get_market_regime.
     if regime == "Chop":
         spy_adx = 15.0
         spy_above = False          # Chop: price below 200MA
     elif regime == "Transition":
         spy_adx = 22.0
         spy_above = True           # Transition: price near 200MA, assume above
-    # Trend: spy_above stays True (default)
+    elif regime == "Trend" and spy_adx < CFG.REGIME_ADX_TREND:
+        spy_adx = CFG.REGIME_ADX_TREND  # clamp: trust "Trend" label over a low parsed ADX
     return regime, spy_adx, spy_above
 
 
@@ -675,6 +714,7 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     "stopPrice": sizing["stop_price"],
                     "entryAtr": atr, "riskPerShare": sizing["risk_per_share"],
                     "highPrice": price,
+                    "entryTime": state.get("_nowET", ""),  # ET "HH:MM" for 30-min hard-stop guard
                 }
             log.append(build_trade_log_entry("buy", {
                 "sym": sym, "shares": shares, "price": price,

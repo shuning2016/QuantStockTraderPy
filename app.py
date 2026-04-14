@@ -666,6 +666,18 @@ def run_trade_session(session: str, provider: str) -> dict:
         for d in decisions:
             if d["symbol"]:
                 d["confidence"] = parse_confidence_score(ai_text, d["symbol"])
+                # Bug-fix: if AI gave a structured BUY but omitted "C:X/10",
+                # parse_confidence_score returns 0 which always fails the gate (0 < 6).
+                # For structured decisions, treat a missing score as neutral (= threshold),
+                # so the trade is allowed through rather than silently blocked.
+                if (d["confidence"] == 0
+                        and d["action"] == "BUY"
+                        and d.get("parse_mode") == "structured"):
+                    d["confidence"] = CFG.SCORE_MIN_NORMAL
+                    _logger.info(
+                        "[%s/%s] %s: no C:X/10 found — defaulting confidence to %d",
+                        provider, session, d["symbol"], CFG.SCORE_MIN_NORMAL,
+                    )
 
         # Log pre-execution state
         _logger.info("[%s/%s] pre-exec state: cash=$%.2f holdings=%s regime=%s",
