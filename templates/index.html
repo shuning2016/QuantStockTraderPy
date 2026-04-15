@@ -266,6 +266,13 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .wr-ai-analysis{font-size:12px;line-height:1.9;color:var(--t);white-space:pre-wrap;padding:14px;background:var(--bg);border-radius:var(--r);margin-top:12px;max-height:400px;overflow-y:auto}
 .wr-run-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
 .wr-meta-txt{font-size:12px;color:var(--t3)}
+.sector-score-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-bottom:16px}
+.sector-score-card{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1.5px solid var(--bdr);font-size:12px}
+.sector-score-card.top{border-color:var(--green);background:var(--green-l)}
+.sector-score-card.eliminated{opacity:.5;border-style:dashed}
+.sector-score-bar{width:40px;height:6px;background:var(--bdr);border-radius:3px;overflow:hidden;flex-shrink:0}
+.sector-score-fill{height:100%;border-radius:3px}
+.suggest-tech-badge{padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;background:var(--purple-l);color:var(--purple);white-space:nowrap;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -1378,24 +1385,48 @@ function renderSuggestions(data) {
   const el = document.getElementById('suggest-content');
   if (!data) { el.innerHTML = '<div class="empty-panel">暂无数据</div>'; return; }
 
-  const sectors   = data.sector_performance || [];
-  const adds      = data.suggestions_add    || [];
-  const removes   = data.suggestions_remove || [];
-  const aiText    = data.ai_analysis        || '';
-  const fromDate  = data.from_date || '';
-  const toDate    = data.to_date   || '';
+  const sectors      = data.sector_performance || [];
+  const sectorScores = data.sector_scores      || [];
+  const adds         = data.suggestions_add    || [];
+  const removes      = data.suggestions_remove || [];
+  const aiText       = data.ai_analysis        || '';
+  const fromDate     = data.from_date || '';
+  const toDate       = data.to_date   || '';
 
-  // Sector ETF chips
-  const sectorHtml = sectors.map(s => {
+  // Sector ETF chips (raw price data)
+  const sectorChipHtml = sectors.map(s => {
     const pct = s.change_pct || 0;
+    const vs  = s.vs_spy || 0;
     const cls = pct > 0.3 ? 'suggest-etf-up' : pct < -0.3 ? 'suggest-etf-dn' : 'suggest-etf-flat';
+    const vsTag = vs > 0 ? `<span style="font-size:9px;color:var(--green)">▲SPY+${vs.toFixed(1)}%</span>`
+                : vs < 0 ? `<span style="font-size:9px;color:var(--red)">▼SPY${vs.toFixed(1)}%</span>` : '';
     return `<div class="suggest-etf-chip ${cls}">
       ${esc(s.etf)} <strong>${pct>=0?'+':''}${pct.toFixed(1)}%</strong>
-      <span style="font-size:10px;opacity:.75">${esc(s.name)}</span>
+      <span style="font-size:10px;opacity:.75">${esc(s.name)}</span> ${vsTag}
     </div>`;
   }).join('');
 
-  // ADD items
+  // Layer 1: Sector scoring cards (from AI analysis)
+  const sortedScores = [...sectorScores].sort((a,b) => (b.score||0) - (a.score||0));
+  const topThreshold = sortedScores.length >= 3 ? (sortedScores[2]||{}).score||0 : 0;
+  const sectorScoreHtml = sortedScores.length
+    ? sortedScores.map(s => {
+        const score = s.score || 0;
+        const isTop = score > 0 && score >= topThreshold && score > 0;
+        const isElim = score === 0;
+        const cls = isTop ? 'top' : isElim ? 'eliminated' : '';
+        const barColor = score >= 70 ? 'var(--green)' : score >= 40 ? 'var(--amber)' : 'var(--red)';
+        return `<div class="sector-score-card ${cls}">
+          <div style="font-weight:700;min-width:42px;color:${isTop?'var(--green)':'var(--t)'}">${esc(s.etf)}</div>
+          <div class="sector-score-bar"><div class="sector-score-fill" style="width:${score}%;background:${barColor}"></div></div>
+          <div style="font-weight:700;min-width:28px;text-align:right;color:${barColor}">${score}</div>
+          <div style="flex:1;font-size:11px;color:var(--t2)">${esc(s.name||'')} ${isElim?'<span style="color:var(--red)">(淘汰)</span>':''}</div>
+          ${isTop?'<span style="font-size:10px;background:var(--green-l);color:var(--green);padding:1px 6px;border-radius:8px;font-weight:700">入选</span>':''}
+        </div>`;
+      }).join('')
+    : '<div style="color:var(--t3);font-size:12px;padding:6px">运行选股建议后显示板块评分</div>';
+
+  // Layer 2: ADD items with tech signals
   const addHtml = adds.length
     ? adds.map(a => `<div class="suggest-item suggest-item-add">
         <span class="suggest-sym suggest-sym-add">+${esc(a.symbol)}</span>
@@ -1403,6 +1434,7 @@ function renderSuggestions(data) {
           <span class="suggest-sector">${esc(a.sector||'')}</span>
           <span class="suggest-reason">${esc(a.reason||'')}</span>
         </div>
+        ${a.tech_signals ? `<span class="suggest-tech-badge">技术 ${esc(a.tech_signals)}</span>` : ''}
         <span class="suggest-type-badge">${esc(a.trade_type||'短线')}</span>
       </div>`).join('')
     : '<div style="color:var(--t3);font-size:12px;padding:6px">暂无推荐</div>';
@@ -1421,15 +1453,22 @@ function renderSuggestions(data) {
     <div class="section-card">
       <div class="section-title">
         <span>📡 板块行情: ${esc(fromDate)} → ${esc(toDate)}</span>
-        <span style="font-size:11px;color:var(--t3)">${sectors.length}个ETF</span>
+        <span style="font-size:11px;color:var(--t3)">${sectors.length}个ETF · 含相对SPY强度</span>
       </div>
-      <div class="suggest-sector-row">${sectorHtml}</div>
+      <div class="suggest-sector-row">${sectorChipHtml}</div>
     </div>
 
     <div class="section-card">
       <div class="section-title">
-        <span style="color:var(--green)">✅ 建议加入观察名单 (${adds.length}只)</span>
-        <span style="font-size:11px;color:var(--t3)">手动添加到左侧列表</span>
+        <span>🏆 第一层：板块评分排名（加权: 相对强度35% + 资金流30% + 催化剂25% + 趋势10%）</span>
+      </div>
+      <div class="sector-score-grid">${sectorScoreHtml}</div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">
+        <span style="color:var(--green)">🎯 第二层：候选股（基本面+技术面筛选）— ${adds.length}只</span>
+        <span style="font-size:11px;color:var(--t3)">市值>$5B · 日均量>500万 · 技术信号≥3/4</span>
       </div>
       <div class="suggest-add-list">${addHtml}</div>
     </div>
@@ -1444,7 +1483,7 @@ function renderSuggestions(data) {
     <div class="section-card">
       <div class="section-title">
         <span>🤖 Claude 完整分析报告</span>
-        <span style="font-size:11px;color:var(--t3)">含策略建议</span>
+        <span style="font-size:11px;color:var(--t3)">含两层筛选详细推理</span>
       </div>
       <div class="wr-ai-analysis">${_renderMarkdown(aiText)}</div>
     </div>`;

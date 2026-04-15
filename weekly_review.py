@@ -339,60 +339,88 @@ def run_weekend_feedback(from_date: str,
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Feature 2 — Watchlist Suggestions
+# Feature 2 — Watchlist Suggestions (Two-Layer Selection Strategy)
+#
+# Strategy: us_stock_selection_strategy.md
+#   Layer 1 — Sector ETF screening (weighted scoring: relative strength
+#             35%, capital inflow 30%, catalysts 25%, trend confirm 10%)
+#   Layer 2 — Individual stock screening (fundamental gates + technical
+#             breakout signals, output 3-5 candidates)
 # ─────────────────────────────────────────────────────────────────────
 
-# Major sector ETFs used to gauge market breadth and rotation
+# Sector ETFs from the strategy document (used for Layer 1 scoring)
 _SECTOR_ETFS = [
-    ("SPY",  "标普500"),
-    ("QQQ",  "纳斯达克100"),
-    ("XLK",  "科技板块"),
-    ("XLF",  "金融板块"),
-    ("XLE",  "能源板块"),
-    ("XLV",  "医疗健康"),
-    ("XLI",  "工业板块"),
-    ("XLC",  "通信服务"),
-    ("XLY",  "非必需消费"),
-    ("XLP",  "必需消费品"),
-    ("XLRE", "房地产"),
-    ("XLU",  "公用事业"),
-    ("XLB",  "材料板块"),
-    ("GLD",  "黄金"),
-    ("IWM",  "小盘股"),
-    ("ARKK", "创新/颠覆性"),
-    ("SMH",  "半导体"),
-    ("IBB",  "生物科技"),
+    ("XLK",  "科技"),
+    ("SOXX", "半导体/AI"),
+    ("CLOU", "AI/云计算"),
+    ("XBI",  "生物医药"),
+    ("IHI",  "医疗器械"),
+    ("XLE",  "能源"),
+    ("XOP",  "油气"),
+    ("XLF",  "金融"),
+    ("IAI",  "券商"),
+    ("XLY",  "消费"),
+    ("XLI",  "工业"),
+    ("XLU",  "防御/公用事业"),
 ]
+
+# SPY is the benchmark — fetched separately for relative-strength comparison
+_BENCHMARK_ETF = "SPY"
 
 
 def fetch_sector_performance(get_quote_fn: Callable) -> list:
     """
-    Fetch current price / daily % change for each sector ETF.
-    Returns list sorted by % change descending (hot sectors first).
+    Fetch price data for each strategy-defined sector ETF + SPY benchmark.
+    Returns list sorted by daily % change descending.
+    Each entry includes the SPY daily change so the AI can compute
+    relative strength (sector vs benchmark) directly.
     """
+    spy_q = None
+    try:
+        spy_q = get_quote_fn(_BENCHMARK_ETF)
+    except Exception as e:
+        logger.warning("SPY quote failed: %s", e)
+    spy_dp = round((spy_q or {}).get("dp", 0) or 0, 2)
+
     results = []
     for etf, name in _SECTOR_ETFS:
         try:
             q = get_quote_fn(etf)
             if q:
+                dp = round(q.get("dp", 0) or 0, 2)
                 results.append({
-                    "etf":        etf,
-                    "name":       name,
-                    "price":      q.get("c", 0),
-                    "change_pct": round(q.get("dp", 0) or 0, 2),
-                    "day_change": round(q.get("d", 0) or 0, 2),
+                    "etf":           etf,
+                    "name":          name,
+                    "price":         round(q.get("c", 0), 2),
+                    "change_pct":    dp,
+                    "day_change":    round(q.get("d", 0) or 0, 2),
+                    "vs_spy":        round(dp - spy_dp, 2),
+                    "open":          round(q.get("o", 0) or 0, 2),
+                    "high":          round(q.get("h", 0) or 0, 2),
+                    "low":           round(q.get("l", 0) or 0, 2),
+                    "prev_close":    round(q.get("pc", 0) or 0, 2),
                 })
         except Exception as e:
             logger.warning("Sector ETF quote failed for %s: %s", etf, e)
 
-    return sorted(results, key=lambda x: x.get("change_pct", 0), reverse=True)
+    results = sorted(results, key=lambda x: x.get("change_pct", 0), reverse=True)
+    # Inject SPY benchmark data at position 0 for reference
+    if spy_q:
+        results.insert(0, {
+            "etf": "SPY", "name": "基准(标普500)",
+            "price": round(spy_q.get("c", 0), 2),
+            "change_pct": spy_dp, "day_change": round(spy_q.get("d", 0) or 0, 2),
+            "vs_spy": 0.0,
+            "open": round(spy_q.get("o", 0) or 0, 2),
+            "high": round(spy_q.get("h", 0) or 0, 2),
+            "low": round(spy_q.get("l", 0) or 0, 2),
+            "prev_close": round(spy_q.get("pc", 0) or 0, 2),
+        })
+    return results
 
 
 def fetch_general_market_news(finnhub_key: str, limit: int = 25) -> list:
-    """
-    Pull general market news from Finnhub's /news endpoint.
-    Category "general" covers broad US market / macro stories.
-    """
+    """Pull general market news from Finnhub for catalyst identification."""
     if not finnhub_key:
         logger.warning("FINNHUB_KEY not set — skipping market news fetch")
         return []
@@ -424,109 +452,181 @@ def build_watchlist_suggestion_prompt(sector_perf: list,
                                        from_date: str,
                                        to_date: str) -> str:
     """
-    Build the AI prompt that generates structured stock recommendations
-    for the coming week based on sector rotation and news catalysts.
+    Build the two-layer stock selection prompt following
+    us_stock_selection_strategy.md methodology.
     """
-    # Sector table
-    sector_txt = "\n".join(
-        f"  {r['etf']:5s} ({r['name']:10s}):  {r['change_pct']:+.2f}%  @ ${r['price']:.2f}"
-        for r in sector_perf
-    ) or "  暂无数据"
+    # Sector table with relative-strength data
+    sector_lines = []
+    for r in sector_perf:
+        vs = r.get("vs_spy", 0)
+        vs_tag = f"跑赢SPY {vs:+.2f}%" if vs > 0 else f"跑输SPY {vs:+.2f}%"
+        sector_lines.append(
+            f"  {r['etf']:5s} ({r['name']:8s}): "
+            f"{r['change_pct']:+.2f}%  ${r['price']:.2f}  "
+            f"H/L ${r.get('high',0):.2f}/${r.get('low',0):.2f}  "
+            f"[{vs_tag}]"
+        )
+    sector_txt = "\n".join(sector_lines) or "  暂无数据"
 
-    # Top news headlines
+    # News headlines for catalyst identification
     news_txt = "\n".join(
         f"  [{i+1:2d}] {n['headline'][:130]}"
         for i, n in enumerate(market_news[:18])
     ) or "  暂无新闻"
 
-    # Current watchlist symbols
+    # Current watchlist
     wl_symbols = [s.get("symbol", "") for s in current_watchlist if s.get("symbol")]
     wl_txt = ", ".join(wl_symbols) or "（空）"
 
-    return f"""你是一位资深美股短线量化分析师，专注于动量交易（持仓1-5天）。
+    return f"""你是一位资深美股超短线量化分析师（持仓2-5天），严格执行以下两层选股策略。
 
-今天是 {to_date}（周末），请根据本周 ({from_date} - {to_date}) 市场表现，
-为下周交易制定股票观察名单策略。
+今天是 {to_date}（周末），请根据本周 ({from_date} → {to_date}) 数据执行选股。
 
-═══════════════════════════════════
-本周板块ETF表现（按涨跌幅排名）
-═══════════════════════════════════
+═══════════════════════════════════════════════════
+数据输入：板块ETF实时行情（含相对SPY强度）
+═══════════════════════════════════════════════════
 {sector_txt}
 
-═══════════════════════════════════
-本周重要市场新闻
-═══════════════════════════════════
+═══════════════════════════════════════════════════
+数据输入：本周重要市场新闻（用于催化剂判断）
+═══════════════════════════════════════════════════
 {news_txt}
 
-═══════════════════════════════════
+═══════════════════════════════════════════════════
 当前观察名单
-═══════════════════════════════════
+═══════════════════════════════════════════════════
 {wl_txt}
 
-═══════════════════════════════════
-任务：输出下周观察名单调整建议
-═══════════════════════════════════
+═══════════════════════════════════════════════════
+第一层：板块筛选（输出2-3个强势板块）
+═══════════════════════════════════════════════════
 
-请严格按以下格式输出（程序将自动解析）：
+请对上方12个板块ETF逐一评分（0-100分），使用以下加权标准：
 
-## 市场整体判断
-[2-3句：市场情绪、趋势强度（Trend/Chop/Transition）、主要风险]
+| 指标                | 权重 | 评分标准                                                    |
+|---------------------|------|-------------------------------------------------------------|
+| 板块ETF相对强度     | 35%  | 过去5日涨幅高于SPY（跑赢）→ 高分；跑输 → 低分              |
+| 资金净流入          | 30%  | 近3日量价齐升（成交量放大+价格上涨）→ 高分                  |
+| 近期催化剂          | 25%  | 本周/下周有行业事件（财报潮、政策、产品发布）→ 高分         |
+| 趋势方向确认        | 10%  | 日线收盘在20日均线上方 → 得分；下方 → 0分                   |
 
-## 下周重点关注板块（前3名）
-1. **[板块名/ETF代码]** — [理由，结合新闻和涨跌幅，50字以内]
-2. **[板块名/ETF代码]** — [理由]
-3. **[板块名/ETF代码]** — [理由]
+**淘汰规则：** ETF收盘价在20日均线下方 → 直接淘汰，不参与评分
 
-## 建议加入观察名单的股票
-每只股票一行，严格遵守以下管道符格式（程序解析用）：
-ADD|股票代码|板块|理由（限80字）|交易类型
+对每个板块，严格输出一行（程序解析用）：
+SECTOR|ETF代码|板块名|综合得分|入选原因（1句话）
+
+示例：
+SECTOR|XLK|科技|82|AI需求推动科技股持续跑赢大盘，量价齐升趋势明确
+SECTOR|SOXX|半导体/AI|78|芯片出口政策利好催化，板块突破前高
+
+请列出所有12个板块的评分（包括被淘汰的，被淘汰的得分标0）：
+
+═══════════════════════════════════════════════════
+第二层：个股筛选（从入选板块中选3-5只候选股）
+═══════════════════════════════════════════════════
+
+从第一层得分最高的2-3个板块中，每个板块选1-2只个股。
+
+### Step A · 基本面门槛（一票否决，不达标直接排除）
+| 条件           | 标准                                           |
+|----------------|------------------------------------------------|
+| 市值           | > $5B                                          |
+| 日均成交量     | > 500万股                                      |
+| 近期营收增速   | 最新季度 YoY > 10%                             |
+| 机构持仓趋势   | 近一季度机构持仓增加或持平                     |
+
+### Step B · 技术面突破信号（满足以下4项中至少3项）
+| 信号           | 判断标准                                       |
+|----------------|------------------------------------------------|
+| 均线位置       | 股价站上20日均线，且20日线斜率向上              |
+| 放量突破       | 突破近期平台，当日量 ≥ 20日均量 × 1.5          |
+| 相对强度       | 近5日个股涨幅 > 板块ETF涨幅（板块内领涨）      |
+| MACD形态       | 日线MACD金叉，或DIF在零轴上方且柱状图扩张      |
+
+**加分项（不计入3项达标，但同等分数优先选择）：**
+旗形整理后突破 / 杯柄形态 / 缩量回调至均线后放量启动
+
+每只候选股输出一行（程序解析用）：
+ADD|股票代码|所属板块|通过技术信号数(N/4)|理由（限80字，含关键支撑位和压力位）|交易类型
 
 交易类型选项：短线动量 / 趋势追踪 / 事件驱动 / 突破买入
 
-示例（请模仿此格式）：
-ADD|NVDA|科技/AI|AI算力需求强劲，突破前高，成交量放大|趋势追踪
+示例：
+ADD|NVDA|科技/AI|4/4|AI算力龙头突破前高$950放量，20日线斜率陡峭，支撑$920压力$980|趋势追踪
 
-请列出5-8只股票：
+请列出3-5只候选股：
 
-## 建议从观察名单移除的股票
-每只一行，格式：
+═══════════════════════════════════════════════════
+建议从观察名单移除的股票
+═══════════════════════════════════════════════════
+检查当前观察名单（{wl_txt}），如有股票满足以下任一条件则建议移除：
+- 跌破20日均线且趋势转弱
+- 所属板块在第一层被淘汰（20MA下方）
+- 基本面恶化（营收不及预期、机构大幅减持）
+
+每只一行：
 REMOVE|股票代码|移除理由（限60字）
 
 若无建议移除，写：REMOVE|无|本周暂无需移除的标的
 
-## 下周交易策略重点
-[3-5条具体操作建议：优先板块、入场信号、规避风险、仓位策略]
+═══════════════════════════════════════════════════
+下周交易策略重点
+═══════════════════════════════════════════════════
+请输出3-5条具体操作建议，包括：
+- 优先操作哪些板块及原因
+- 入场信号关注什么（突破、回调、量能）
+- 本周需规避的风险（宏观事件、财报雷区）
+- 仓位策略建议（趋势市满仓 vs 震荡市半仓）
 
 注意事项：
-- 只推荐NYSE/NASDAQ上市的美股，不推荐OTC/粉单市场股票
-- 日均成交量须 > 50万股（确保流动性）
-- 优先有催化剂（财报预期、产品发布、政策利好）的标的
-- 结合板块Regime给出相应仓位建议（趋势市满仓，震荡市半仓）"""
+- 只推荐NYSE/NASDAQ上市美股，不推荐OTC/粉单
+- 日均成交量须 > 500万股
+- 市值须 > $5B
+- 优先有催化剂的标的"""
 
 
 def parse_watchlist_suggestions(ai_text: str) -> dict:
     """
-    Extract ADD and REMOVE lines from AI output.
+    Extract SECTOR, ADD, and REMOVE lines from the two-layer AI output.
 
-    Expected pipe format:
-      ADD|SYMBOL|Sector|Reason|TradeType
+    Formats:
+      SECTOR|ETF|Name|Score|Reason
+      ADD|SYMBOL|Sector|TechSignals|Reason|TradeType
       REMOVE|SYMBOL|Reason
     """
+    sectors = []
     adds    = []
     removes = []
 
     for line in ai_text.splitlines():
         line = line.strip()
 
-        if line.upper().startswith("ADD|"):
+        if line.upper().startswith("SECTOR|"):
+            parts = [p.strip() for p in line.split("|")]
+            etf = parts[1].upper() if len(parts) > 1 else ""
+            if etf and etf != "无":
+                score = 0
+                try:
+                    score = int(parts[3]) if len(parts) > 3 else 0
+                except ValueError:
+                    pass
+                sectors.append({
+                    "etf":    etf,
+                    "name":   parts[2] if len(parts) > 2 else "",
+                    "score":  score,
+                    "reason": parts[4] if len(parts) > 4 else "",
+                })
+
+        elif line.upper().startswith("ADD|"):
             parts = [p.strip() for p in line.split("|")]
             sym = parts[1].upper() if len(parts) > 1 else ""
             if sym and sym != "无":
                 adds.append({
-                    "symbol":     sym,
-                    "sector":     parts[2] if len(parts) > 2 else "",
-                    "reason":     parts[3] if len(parts) > 3 else "",
-                    "trade_type": parts[4] if len(parts) > 4 else "短线动量",
+                    "symbol":       sym,
+                    "sector":       parts[2] if len(parts) > 2 else "",
+                    "tech_signals": parts[3] if len(parts) > 3 else "",
+                    "reason":       parts[4] if len(parts) > 4 else "",
+                    "trade_type":   parts[5] if len(parts) > 5 else "短线动量",
                 })
 
         elif line.upper().startswith("REMOVE|"):
@@ -538,7 +638,7 @@ def parse_watchlist_suggestions(ai_text: str) -> dict:
                     "reason": parts[2] if len(parts) > 2 else "",
                 })
 
-    return {"add": adds, "remove": removes}
+    return {"sectors": sectors, "add": adds, "remove": removes}
 
 
 def run_watchlist_suggestions(from_date: str,
@@ -549,18 +649,10 @@ def run_watchlist_suggestions(from_date: str,
                                current_watchlist: list,
                                append_log_fn: Callable) -> dict:
     """
-    Orchestrate the full watchlist suggestion pipeline.
+    Execute the two-layer stock selection pipeline.
 
-    Args:
-        from_date / to_date : past week boundaries
-        finnhub_key         : API key for general news fetch
-        get_quote_fn        : get_stock_quote(symbol) → dict | None
-        call_ai_fn          : call_ai(prompt, provider) → str
-        current_watchlist   : list of {"symbol":…, "type":…}
-        append_log_fn       : append_log(prefix, entry, date_str)
-
-    Returns:
-        Full suggestion entry dict (also persisted to logs).
+    Layer 1: Score all 12 sector ETFs via weighted criteria
+    Layer 2: From top 2-3 sectors, pick 3-5 individual stocks
     """
     logger.info("Watchlist suggestions: %s → %s", from_date, to_date)
 
@@ -572,7 +664,12 @@ def run_watchlist_suggestions(from_date: str,
 
     prompt  = build_watchlist_suggestion_prompt(
         sector_perf, market_news, current_watchlist, from_date, to_date)
-    ai_text = call_ai_fn(prompt, "claude")   # Claude for best analysis
+
+    try:
+        ai_text = call_ai_fn(prompt, "claude")
+    except Exception as e:
+        logger.error("Watchlist suggestion AI call failed: %s", e)
+        ai_text = f"[ERROR] AI分析生成失败: {e}"
 
     parsed  = parse_watchlist_suggestions(ai_text)
 
@@ -582,6 +679,7 @@ def run_watchlist_suggestions(from_date: str,
         "from_date":          from_date,
         "to_date":            to_date,
         "sector_performance": sector_perf,
+        "sector_scores":      parsed["sectors"],
         "market_news_count":  len(market_news),
         "ai_analysis":        ai_text,
         "suggestions_add":    parsed["add"],
@@ -590,6 +688,6 @@ def run_watchlist_suggestions(from_date: str,
     }
     append_log_fn("suggestions", entry, to_date)
 
-    logger.info("Suggestions: %d add, %d remove",
-                len(parsed["add"]), len(parsed["remove"]))
+    logger.info("Suggestions: %d sectors scored, %d add, %d remove",
+                len(parsed["sectors"]), len(parsed["add"]), len(parsed["remove"]))
     return entry
