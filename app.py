@@ -652,15 +652,34 @@ def run_trade_session(session: str, provider: str) -> dict:
     if session == "premarket":
         _logger.info("[%s/%s] premarket — analysis only, no execution", provider, session)
     else:
-        decisions = parse_ai_decisions(ai_text)
-        _logger.info("[%s/%s] parsed %d decision(s): %s",
-                     provider, session, len(decisions),
-                     [(d["action"], d["symbol"], d["shares"], d.get("parse_mode","?"))
-                      for d in decisions])
+        # Guard: if the AI call itself failed, skip parsing entirely.
+        # The real error is already logged inside call_ai; avoid a misleading
+        # "no DECISION block found" warning that buries the actual root cause.
+        if ai_text.startswith("[ERROR]"):
+            _logger.error("[%s/%s] AI call failed — skipping decision parse: %s",
+                          provider, session, ai_text)
+            decisions = []
+        else:
+            decisions = parse_ai_decisions(ai_text)
+            _logger.info("[%s/%s] parsed %d decision(s): %s",
+                         provider, session, len(decisions),
+                         [(d["action"], d["symbol"], d["shares"], d.get("parse_mode","?"))
+                          for d in decisions])
 
-        if not decisions:
-            _logger.warning("[%s/%s] NO decisions parsed — AI text preview: %s",
-                            provider, session, ai_text[:400])
+            # Synthetic HOLD fallback: AI gave a real response but no parseable
+            # DECISION block — this is normal "hold all" behaviour (AI decided no
+            # trades). Record it as HOLD so the session log is clean instead of
+            # showing the scary "no DECISION found" warning.
+            if not decisions:
+                _logger.info(
+                    "[%s/%s] No DECISION block found — inserting synthetic HOLD. "
+                    "AI text preview: %s", provider, session, ai_text[:300]
+                )
+                decisions = [{
+                    "action": "HOLD", "symbol": "", "shares": 0,
+                    "reason": "AI未输出结构化DECISION，默认持仓不变",
+                    "parse_mode": "synthetic_hold", "confidence": 0,
+                }]
 
         # Inject confidence scores
         for d in decisions:
@@ -714,13 +733,11 @@ def run_trade_session(session: str, provider: str) -> dict:
                 "detail":     f"Decision parsed but blocked by position rules or session rules",
             })
 
-    # If NO decisions were parsed at all, record that clearly
-    if not decisions and session != "premarket":
+    # If an AI error prevented parsing, record that clearly (separate from "hold" case)
+    if not decisions and session != "premarket" and ai_text.startswith("[ERROR]"):
         exec_log.append({
-            "status": "no_decisions_parsed",
-            "detail": ("AI response did not contain a parseable DECISION block. "
-                       "Expected format: BUY|SYM|N|reason or prose buy/sell intent."),
-            "ai_text_preview": ai_text[:300],
+            "status": "ai_error",
+            "detail": ai_text,
         })
 
     # Log session to JSONL

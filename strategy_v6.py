@@ -348,8 +348,11 @@ def parse_ai_decisions(ai_text):
     in_block = False
     blank_count = 0  # allow up to 1 blank line inside block before stopping
 
-    # Match both English "DECISION:" and Chinese "决策:"
-    _BLOCK_START = _re.compile(r"(?:DECISION|决策)\s*[:：]", _re.IGNORECASE)
+    # Match English "DECISION:" and all common Chinese header variants AIs use
+    _BLOCK_START = _re.compile(
+        r"(?:DECISION|决策|操作建议|交易建议|交易决策|今日决策|建议操作)\s*[:：]",
+        _re.IGNORECASE
+    )
 
     for line in ai_text.split("\n"):
         if _BLOCK_START.search(line):
@@ -379,6 +382,11 @@ def parse_ai_decisions(ai_text):
         # Normalise: strip bold markers (**...**) and spaces around pipes
         normalised = _re.sub(r"\*{1,2}", "", raw)
         normalised = _re.sub(r"\s*\|\s*", "|", normalised).strip()
+        # Normalise Chinese action words → English so "买入|AAPL|10|reason"
+        # parses identically to "BUY|AAPL|10|reason"
+        normalised = _re.sub(r"^(?:买入|建仓|开仓|做多|入场)", "BUY",  normalised)
+        normalised = _re.sub(r"^(?:卖出|平仓|清仓|减仓|做空)", "SELL", normalised)
+        normalised = _re.sub(r"^(?:持有|持仓|不操作|观望|不变)", "HOLD", normalised)
         m = _re.match(
             r"(BUY|SELL|HOLD)\|([A-Z0-9.]{0,12})\|(\d*)\|?(.*)",
             normalised, _re.IGNORECASE
