@@ -735,8 +735,12 @@ def run_trade_session(session: str, provider: str) -> dict:
 
         executed = execute_decisions(decisions, state, session, prices, atr_est)
 
-        _logger.info("[%s/%s] execution results (%d lines): %s",
-                     provider, session, len(executed), executed)
+        _logger.info("[%s/%s] ── EXECUTION RESULTS (%d) ──────────────────",
+                     provider, session, len(executed))
+        for _line in executed:
+            _logger.info("[%s/%s]   %s", provider, session, _line)
+        if not executed:
+            _logger.info("[%s/%s]   (no decisions executed)", provider, session)
 
     # ── Execution diagnostic log ──────────────────────────────────
     # Records every decision attempt with outcome + reason, so you can
@@ -888,6 +892,7 @@ def cron_run(session, provider):
             "session":  session,
             "provider": provider,
             "executed": result.get("executed", []),
+            "exec_log": result.get("exec_log", []),
             "decisions_parsed":   result.get("decisions_parsed", 0),
             "decisions_executed": result.get("decisions_executed", 0),
         })
