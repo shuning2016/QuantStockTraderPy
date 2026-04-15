@@ -168,7 +168,19 @@ def _next_ym(ym: str) -> str:
     return f"{y:04d}-{m:02d}"
 
 def load_watchlist():
-    # Priority 1: local file (works locally and persists across restarts)
+    # Priority 1: Redis/KV (persistent across Vercel cold starts — same store
+    # used for trade state and logs).
+    if _USE_KV:
+        data = _kv(["GET", "watchlist"])
+        if data:
+            try:
+                wl = json.loads(data)
+                if isinstance(wl, list) and wl:
+                    return wl
+            except Exception as e:
+                _log_kv.error("KV watchlist parse error: %s", e)
+
+    # Priority 2: local file (works locally and persists across restarts)
     if WATCHLIST_FILE.exists():
         try:
             return json.loads(WATCHLIST_FILE.read_text())
@@ -177,8 +189,8 @@ def load_watchlist():
                 "Watchlist file corrupted — resetting to empty. Error: %s", e)
         except Exception as e:
             _logging.getLogger(__name__).error("Could not read watchlist: %s", e)
-    # Priority 2: WATCHLIST env var (set this in Vercel dashboard to persist
-    # across cold starts — copy the JSON array value from a working session)
+
+    # Priority 3: WATCHLIST_JSON env var (manual fallback)
     env_wl = os.environ.get("WATCHLIST_JSON", "")
     if env_wl:
         try:
@@ -188,19 +200,16 @@ def load_watchlist():
     return []
 
 def save_watchlist(stocks):
-    # Always try to write the file (works locally; /tmp on Vercel — temporary but
-    # better than nothing within a session)
+    # Always persist to Redis/KV first so cron jobs see the latest list even
+    # after a Vercel cold start wipes /tmp.
+    if _USE_KV:
+        _kv(["SET", "watchlist", json.dumps(stocks)])
+
+    # Also write to local file (works for local dev; /tmp on Vercel as backup)
     try:
         WATCHLIST_FILE.write_text(json.dumps(stocks))
     except OSError:
         pass
-    # Hint in logs so user knows to set env var for persistence on Vercel
-    if os.environ.get("VERCEL"):
-        _logging.getLogger(__name__).warning(
-            "VERCEL: watchlist saved to /tmp only (ephemeral). "
-            "To persist across deployments, set WATCHLIST_JSON env var in "
-            "Vercel dashboard to: %s", json.dumps(stocks)
-        )
 
 def _state_file(provider: str) -> Path:
     return STATE_DIR / f"state_{provider}.json"
@@ -566,6 +575,21 @@ def run_trade_session(session: str, provider: str) -> dict:
     state = load_trade_state(provider)
     stocks = load_watchlist()
     stock_items = [s for s in stocks if s.get("type") == "stock"]
+
+    # Guard: abort early if watchlist is empty so we never send a blank prompt.
+    # Root cause is usually a Vercel cold start wiping /tmp before KV was set up —
+    # now fixed by persisting watchlist to KV in save_watchlist().
+    if not stock_items:
+        _logging.getLogger("quant.session").error(
+            "[%s/%s] Watchlist is empty — skipping session. "
+            "Add stocks via the UI; they are now persisted to Redis.", provider, session)
+        return {
+            "state": state, "aiText": "", "executed": [],
+            "exec_log": [{"status": "error",
+                          "detail": "观察列表为空，请在 UI 中添加股票后重试。"}],
+            "decisions_parsed": 0, "decisions_executed": 0,
+            "session": session, "provider": provider,
+        }
 
     # Update time context
     now    = now_et()
