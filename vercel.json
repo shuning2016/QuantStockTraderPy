@@ -25,8 +25,11 @@
     { "path": "/api/cron/mid/claude",         "schedule": "2 16 * * 1-5" },
     { "path": "/api/cron/mid/deepseek",       "schedule": "4 16 * * 1-5" },
 
-    { "path": "/api/cron/closing/grok",       "schedule": "30 19 * * 1-5" },
-    { "path": "/api/cron/closing/claude",     "schedule": "32 19 * * 1-5" },
-    { "path": "/api/cron/closing/deepseek",   "schedule": "34 19 * * 1-5" }
+    { "path": "/api/cron/closing/grok",           "schedule": "30 19 * * 1-5" },
+    { "path": "/api/cron/closing/claude",         "schedule": "32 19 * * 1-5" },
+    { "path": "/api/cron/closing/deepseek",       "schedule": "34 19 * * 1-5" },
+
+    { "path": "/api/cron/weekend-feedback",       "schedule": "0 14 * * 6" },
+    { "path": "/api/cron/watchlist-suggestions",  "schedule": "0 16 * * 6" }
   ]
 }

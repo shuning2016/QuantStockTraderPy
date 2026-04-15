@@ -33,6 +33,11 @@ from strategy_v6 import (
     parse_regime_from_text, parse_atr_from_text,
     execute_decisions, check_operating_rules, get_market_regime,
 )
+from weekly_review import (
+    most_recent_week,
+    run_weekend_feedback,
+    run_watchlist_suggestions,
+)
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.urandom(24)
@@ -930,6 +935,69 @@ def cron_status():
                         "closing":   "19:30 UTC (15:30 ET EDT)",
                     }})
 
+@app.route("/api/cron/weekend-feedback", methods=["GET"])
+def cron_weekend_feedback():
+    """
+    Saturday cron — analyze last week's trade decisions vs actual outcomes.
+    Runs at 14:00 UTC (10:00 ET Saturday) via vercel.json cron.
+    """
+    if not _verify_cron(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    _logging.getLogger("quant.cron").info("Weekend feedback cron triggered")
+    try:
+        from_dt, to_dt = most_recent_week()
+        result = run_weekend_feedback(
+            from_date     = from_dt,
+            to_date       = to_dt,
+            read_log_fn   = read_log_range,
+            get_quote_fn  = get_stock_quote,
+            call_ai_fn    = call_ai,
+            append_log_fn = append_log,
+        )
+        providers = list(result.get("reports", {}).keys())
+        _logging.getLogger("quant.cron").info(
+            "Weekend feedback done: %s → %s, providers=%s", from_dt, to_dt, providers)
+        return jsonify({"ok": True, "from_date": from_dt, "to_date": to_dt,
+                        "providers_analyzed": providers})
+    except Exception as e:
+        _logging.getLogger("quant.cron").error("Weekend feedback error: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/cron/watchlist-suggestions", methods=["GET"])
+def cron_watchlist_suggestions():
+    """
+    Saturday cron — scan news and generate watchlist add/remove suggestions.
+    Runs at 16:00 UTC (12:00 ET Saturday) via vercel.json cron.
+    """
+    if not _verify_cron(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    _logging.getLogger("quant.cron").info("Watchlist suggestions cron triggered")
+    try:
+        from_dt, to_dt = most_recent_week()
+        result = run_watchlist_suggestions(
+            from_date         = from_dt,
+            to_date           = to_dt,
+            finnhub_key       = FINNHUB_KEY,
+            get_quote_fn      = get_stock_quote,
+            call_ai_fn        = call_ai,
+            current_watchlist = load_watchlist(),
+            append_log_fn     = append_log,
+        )
+        return jsonify({
+            "ok":         True,
+            "from_date":  from_dt,
+            "to_date":    to_dt,
+            "add_count":  len(result.get("suggestions_add", [])),
+            "remove_count": len(result.get("suggestions_remove", [])),
+        })
+    except Exception as e:
+        _logging.getLogger("quant.cron").error("Watchlist suggestions error: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/kv-status", methods=["GET"])
 def kv_status():
     """Check KV/Redis connectivity — used by the UI to warn if logs won't persist."""
@@ -1025,6 +1093,44 @@ def dispatch(action: str, data: dict):
                               data.get("aiProvider"))
     if action == "listDriveLogFiles":
         return list_log_files()
+
+    # ── Weekly feedback report ────────────────────────────────────
+    if action == "getWeeklyFeedback":
+        today    = today_et()
+        # Allow caller to override date range; default = most recent Mon-Fri week
+        from_dt  = data.get("fromDate") or most_recent_week()[0]
+        to_dt    = data.get("toDate")   or most_recent_week()[1]
+        return read_log_range("feedback", from_dt, to_dt)
+
+    if action == "runWeeklyFeedback":
+        from_dt, to_dt = most_recent_week()
+        return run_weekend_feedback(
+            from_date     = from_dt,
+            to_date       = to_dt,
+            read_log_fn   = read_log_range,
+            get_quote_fn  = get_stock_quote,
+            call_ai_fn    = call_ai,
+            append_log_fn = append_log,
+        )
+
+    # ── Watchlist suggestions ─────────────────────────────────────
+    if action == "getWatchlistSuggestions":
+        today   = today_et()
+        from_dt = data.get("fromDate") or most_recent_week()[0]
+        to_dt   = data.get("toDate")   or most_recent_week()[1]
+        return read_log_range("suggestions", from_dt, to_dt)
+
+    if action == "runWatchlistSuggestions":
+        from_dt, to_dt = most_recent_week()
+        return run_watchlist_suggestions(
+            from_date        = from_dt,
+            to_date          = to_dt,
+            finnhub_key      = FINNHUB_KEY,
+            get_quote_fn     = get_stock_quote,
+            call_ai_fn       = call_ai,
+            current_watchlist= load_watchlist(),
+            append_log_fn    = append_log,
+        )
 
     # Trigger time (stub)
     if action == "getTriggerTime":

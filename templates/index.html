@@ -231,6 +231,41 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .log-tab-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
 .section-card{background:var(--card);border-radius:var(--r);padding:16px;box-shadow:var(--sh);margin-bottom:16px}
 .section-title{font-size:13px;font-weight:600;color:var(--t2);margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
+
+/* Weekly Review tab */
+.wr-sub-tabs{display:flex;gap:6px;margin-bottom:16px}
+.wr-sub-btn{padding:5px 16px;border-radius:20px;border:1.5px solid var(--bdr);font-size:12px;font-weight:600;cursor:pointer;background:var(--card);color:var(--t2);transition:all .15s}
+.wr-sub-btn.active{background:var(--purple);color:#fff;border-color:var(--purple)}
+.wr-provider-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px}
+.wr-pcard{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);border:2px solid var(--bdr);overflow:hidden}
+.wr-pcard-hdr{padding:12px 14px 10px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:8px}
+.wr-pcard-name{font-weight:700;font-size:14px}
+.wr-pcard-stats{display:flex;border-bottom:1px solid var(--bdr)}
+.wr-stat{flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--bdr)}
+.wr-stat:last-child{border-right:none}
+.wr-stat-val{font-weight:700;font-size:13px}
+.wr-stat-lbl{font-size:10px;color:var(--t3);margin-top:2px;text-transform:uppercase;letter-spacing:.3px}
+.wr-report-box{padding:14px;font-size:12px;line-height:1.8;color:var(--t);white-space:pre-wrap;max-height:320px;overflow-y:auto;background:var(--bg);border-radius:0 0 var(--r) var(--r)}
+.wr-report-box h2{font-size:13px;font-weight:700;color:var(--blue);margin:10px 0 4px}
+.suggest-sector-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.suggest-etf-chip{padding:5px 11px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap}
+.suggest-etf-up{background:var(--green-l);color:var(--green)}
+.suggest-etf-dn{background:var(--red-l);color:var(--red)}
+.suggest-etf-flat{background:var(--bg);color:var(--t2);border:1px solid var(--bdr)}
+.suggest-add-list,.suggest-rm-list{display:flex;flex-direction:column;gap:8px;margin-bottom:18px}
+.suggest-item{display:flex;align-items:flex-start;gap:10px;padding:10px 13px;border-radius:9px;font-size:13px}
+.suggest-item-add{background:var(--green-l);border:1px solid #c8e6c9}
+.suggest-item-rm{background:var(--red-l);border:1px solid #ffcdd2}
+.suggest-sym{font-weight:700;font-size:15px;min-width:54px}
+.suggest-sym-add{color:var(--green)}
+.suggest-sym-rm{color:var(--red)}
+.suggest-meta{display:flex;flex-direction:column;gap:2px;flex:1}
+.suggest-sector{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.3px}
+.suggest-reason{font-size:12px;color:var(--t);line-height:1.5}
+.suggest-type-badge{padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;background:var(--blue-l);color:var(--blue);white-space:nowrap;flex-shrink:0}
+.wr-ai-analysis{font-size:12px;line-height:1.9;color:var(--t);white-space:pre-wrap;padding:14px;background:var(--bg);border-radius:var(--r);margin-top:12px;max-height:400px;overflow-y:auto}
+.wr-run-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.wr-meta-txt{font-size:12px;color:var(--t3)}
 </style>
 </head>
 <body>
@@ -285,6 +320,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="tab active" id="tab-news"     onclick="switchTab('news')">行情 &amp; 新闻</div>
       <div class="tab"        id="tab-trade"    onclick="switchTab('trade')">模拟交易</div>
       <div class="tab"        id="tab-messages" onclick="switchTab('messages')">交易记录</div>
+      <div class="tab"        id="tab-weekly"   onclick="switchTab('weekly')">周报 &amp; 建议</div>
     </div>
 
     <!-- News panel -->
@@ -296,6 +332,34 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
     <!-- Trade panel -->
     <div id="panel-trade" style="display:none">
       <div id="trade-root"><div class="lcenter"><span class="sp dk"></span></div></div>
+    </div>
+
+    <!-- Weekly Review panel -->
+    <div id="panel-weekly" style="display:none">
+
+      <!-- Sub-tab switcher -->
+      <div class="wr-sub-tabs">
+        <button class="wr-sub-btn active" id="wrtab-feedback"     onclick="switchWrTab('feedback')">📊 交易复盘</button>
+        <button class="wr-sub-btn"        id="wrtab-suggestions"  onclick="switchWrTab('suggestions')">💡 选股建议</button>
+      </div>
+
+      <!-- ── Feedback sub-panel ── -->
+      <div id="wrpanel-feedback">
+        <div class="wr-run-bar">
+          <button class="btn btn-sm btn-p" onclick="runWeeklyFeedback()" id="btn-run-feedback">🔄 立即生成复盘报告</button>
+          <span class="wr-meta-txt" id="feedback-meta">周六 10:00 ET 自动运行 · 分析上周 Mon-Fri 所有交易决策</span>
+        </div>
+        <div id="feedback-content"><div class="empty-panel">点击「立即生成复盘报告」或等待周六自动运行</div></div>
+      </div>
+
+      <!-- ── Suggestions sub-panel ── -->
+      <div id="wrpanel-suggestions" style="display:none">
+        <div class="wr-run-bar">
+          <button class="btn btn-sm btn-p" onclick="runWatchlistSuggestions()" id="btn-run-suggest">🔍 立即生成选股建议</button>
+          <span class="wr-meta-txt" id="suggest-meta">周六 12:00 ET 自动运行 · 扫描板块新闻推荐下周观察名单</span>
+        </div>
+        <div id="suggest-content"><div class="empty-panel">点击「立即生成选股建议」或等待周六自动运行</div></div>
+      </div>
     </div>
 
     <!-- Log panel -->
@@ -569,7 +633,7 @@ async function analyzeItem(sym,type){
 // ═══════════════════════════════════════════════════════════════
 let _currentLogTab='sessions', _tradeTimer=null;
 function switchTab(n){
-  ['news','trade','messages'].forEach(t=>{
+  ['news','trade','messages','weekly'].forEach(t=>{
     document.getElementById('panel-'+t).style.display=t===n?'':'none';
     document.getElementById('tab-'+t).className='tab'+(t===n?' active':'');
   });
@@ -585,6 +649,7 @@ function switchTab(n){
     switchLogTab('sessions');
     checkKvStatus();
   }
+  if(n==='weekly') initWeeklyPanel();
 }
 
 async function checkKvStatus(){
@@ -1117,6 +1182,272 @@ async function loadLogFiles(){
       </div>
     </div>`;
   }catch(e){el.innerHTML=`<div class="empty-panel" style="color:var(--red)">加载失败: ${esc(e.message)}</div>`;}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  WEEKLY REVIEW — Feedback Loop & Watchlist Suggestions
+// ═══════════════════════════════════════════════════════════════
+let _wrSubTab = 'feedback';
+
+function switchWrTab(t) {
+  _wrSubTab = t;
+  ['feedback','suggestions'].forEach(s => {
+    document.getElementById('wrtab-'+s).className = 'wr-sub-btn' + (s===t?' active':'');
+    document.getElementById('wrpanel-'+s).style.display = s===t?'':'none';
+  });
+}
+
+async function initWeeklyPanel() {
+  // Auto-load the most recent saved report if available
+  await loadSavedFeedback();
+  await loadSavedSuggestions();
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+function _qualityColor(q) {
+  if(q==='good')    return 'var(--green)';
+  if(q==='bad')     return 'var(--red)';
+  return 'var(--t3)';
+}
+function _qualityIcon(q) {
+  if(q==='good') return '✅';
+  if(q==='bad')  return '❌';
+  return '⚖️';
+}
+function _renderMarkdown(text) {
+  // Convert ## headings and basic line breaks for the AI report display
+  if(!text) return '';
+  return esc(text)
+    .replace(/^## (.+)$/gm, '<strong style="color:var(--blue);display:block;margin:10px 0 3px">$1</strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+}
+
+// ── Feature 1: Trade Feedback ─────────────────────────────────────────
+async function loadSavedFeedback() {
+  const el = document.getElementById('feedback-content');
+  try {
+    const records = await api('getWeeklyFeedback') || [];
+    if (!records.length) return; // no saved report yet — keep placeholder
+    renderFeedbackReports(records);
+  } catch(e) { /* silent — user can click Run to generate */ }
+}
+
+async function runWeeklyFeedback() {
+  const btn = document.getElementById('btn-run-feedback');
+  const el  = document.getElementById('feedback-content');
+  btn.disabled = true;
+  btn.textContent = '⏳ 分析中…';
+  el.innerHTML = '<div class="lcenter"><span class="sp dk"></span><span style="margin-left:10px;font-size:13px;color:var(--t2)">正在读取交易日志并调用 Claude 生成复盘报告，约需 30-60 秒…</span></div>';
+  try {
+    const result = await api('runWeeklyFeedback');
+    const reports = result && result.reports ? Object.values(result.reports) : [];
+    renderFeedbackReports(reports);
+    showToast('复盘报告生成完成');
+  } catch(e) {
+    el.innerHTML = `<div class="empty-panel" style="color:var(--red)">生成失败: ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 立即生成复盘报告';
+  }
+}
+
+function renderFeedbackReports(records) {
+  const el = document.getElementById('feedback-content');
+  if (!records || !records.length) {
+    el.innerHTML = '<div class="empty-panel">暂无复盘数据 — 本周需要有交易记录才能生成报告</div>';
+    return;
+  }
+
+  // Normalize: records may be array of entries or array of provider objects
+  const list = Array.isArray(records) ? records : Object.values(records);
+  const grouped = {}; // group by from_date
+  list.forEach(r => {
+    const key = `${r.from_date||'?'} → ${r.to_date||'?'}`;
+    grouped[key] = grouped[key] || [];
+    grouped[key].push(r);
+  });
+
+  const AI_ICONS = {claude:'✦', grok:'🤖', deepseek:'🔵'};
+  const AI_COLORS = {claude:'var(--purple)', grok:'var(--blue)', deepseek:'#1565c0'};
+
+  el.innerHTML = Object.entries(grouped).map(([week, reps]) => {
+    const providerCards = reps.map(r => {
+      const prov   = r.provider || '?';
+      const icon   = AI_ICONS[prov] || '🤖';
+      const color  = AI_COLORS[prov] || 'var(--blue)';
+      const total  = r.total_trades || 0;
+      const wins   = r.win_count   || 0;
+      const losses = r.loss_count  || 0;
+      const pnl    = r.total_pnl   || 0;
+      const wr     = r.win_rate    || 0;
+      const report = r.ai_report   || '';
+      const decisions = r.decisions || [];
+
+      const decisionRows = decisions.slice(0,8).map(d => {
+        const sym   = d.symbol || '';
+        const ret   = d.return_pct || 0;
+        const qual  = d.quality || 'neutral';
+        const ic    = _qualityIcon(qual);
+        const cl    = _qualityColor(qual);
+        const type  = d.action_type === 'open_position' ? '持仓中' : '已平';
+        const conf  = d.confidence || 0;
+        const stopV = d.stop_verdict || '';
+        const stopTag = stopV ? (stopV==='good_stop'
+          ? '<span style="font-size:10px;background:var(--green-l);color:var(--green);padding:1px 6px;border-radius:8px">✓正确止损</span>'
+          : '<span style="font-size:10px;background:var(--red-l);color:var(--red);padding:1px 6px;border-radius:8px">✗过早止损</span>') : '';
+        return `<div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px dashed var(--bdr);font-size:12px">
+          <span>${ic}</span>
+          <span style="font-weight:700;color:var(--blue);min-width:42px">${esc(sym)}</span>
+          <span style="color:${cl};font-weight:700">${ret>=0?'+':''}${ret.toFixed(1)}%</span>
+          <span style="color:var(--t3);font-size:11px">${type}</span>
+          <span style="color:var(--t3);font-size:11px">C:${conf}/10</span>
+          ${stopTag}
+        </div>`;
+      }).join('');
+
+      return `<div class="wr-pcard">
+        <div class="wr-pcard-hdr">
+          <span style="font-size:18px">${icon}</span>
+          <div>
+            <div class="wr-pcard-name" style="color:${color}">${esc(prov.charAt(0).toUpperCase()+prov.slice(1))}</div>
+            <div style="font-size:10px;color:var(--t3)">${r.from_date||''} → ${r.to_date||''}</div>
+          </div>
+        </div>
+        <div class="wr-pcard-stats">
+          <div class="wr-stat">
+            <div class="wr-stat-val">${total}</div>
+            <div class="wr-stat-lbl">总决策</div>
+          </div>
+          <div class="wr-stat">
+            <div class="wr-stat-val" style="color:${wr>=50?'var(--green)':'var(--red)'}">${wr.toFixed(0)}%</div>
+            <div class="wr-stat-lbl">胜率</div>
+          </div>
+          <div class="wr-stat">
+            <div class="wr-stat-val" style="color:${wins>=0?'var(--green)':'var(--red)'}">${wins}W/${losses}L</div>
+            <div class="wr-stat-lbl">胜/败</div>
+          </div>
+          <div class="wr-stat">
+            <div class="wr-stat-val" style="color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(0)}</div>
+            <div class="wr-stat-lbl">实现盈亏</div>
+          </div>
+        </div>
+        ${decisions.length ? `<div style="padding:10px 13px 0">${decisionRows}</div>` : ''}
+        <div class="wr-report-box">${_renderMarkdown(report)}</div>
+      </div>`;
+    }).join('');
+
+    return `<div class="section-card">
+      <div class="section-title">
+        <span>📅 本周复盘: ${esc(week)}</span>
+        <span style="font-size:11px;color:var(--t3)">由 Claude 生成</span>
+      </div>
+      <div class="wr-provider-grid">${providerCards}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Feature 2: Watchlist Suggestions ─────────────────────────────────
+async function loadSavedSuggestions() {
+  try {
+    const records = await api('getWatchlistSuggestions') || [];
+    if (!records.length) return;
+    renderSuggestions(records[0]); // show most recent
+  } catch(e) { /* silent */ }
+}
+
+async function runWatchlistSuggestions() {
+  const btn = document.getElementById('btn-run-suggest');
+  const el  = document.getElementById('suggest-content');
+  btn.disabled = true;
+  btn.textContent = '⏳ 分析中…';
+  el.innerHTML = '<div class="lcenter"><span class="sp dk"></span><span style="margin-left:10px;font-size:13px;color:var(--t2)">正在获取板块行情、市场新闻并生成选股建议，约需 30-60 秒…</span></div>';
+  try {
+    const result = await api('runWatchlistSuggestions');
+    renderSuggestions(result);
+    showToast('选股建议生成完成');
+  } catch(e) {
+    el.innerHTML = `<div class="empty-panel" style="color:var(--red)">生成失败: ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 立即生成选股建议';
+  }
+}
+
+function renderSuggestions(data) {
+  const el = document.getElementById('suggest-content');
+  if (!data) { el.innerHTML = '<div class="empty-panel">暂无数据</div>'; return; }
+
+  const sectors   = data.sector_performance || [];
+  const adds      = data.suggestions_add    || [];
+  const removes   = data.suggestions_remove || [];
+  const aiText    = data.ai_analysis        || '';
+  const fromDate  = data.from_date || '';
+  const toDate    = data.to_date   || '';
+
+  // Sector ETF chips
+  const sectorHtml = sectors.map(s => {
+    const pct = s.change_pct || 0;
+    const cls = pct > 0.3 ? 'suggest-etf-up' : pct < -0.3 ? 'suggest-etf-dn' : 'suggest-etf-flat';
+    return `<div class="suggest-etf-chip ${cls}">
+      ${esc(s.etf)} <strong>${pct>=0?'+':''}${pct.toFixed(1)}%</strong>
+      <span style="font-size:10px;opacity:.75">${esc(s.name)}</span>
+    </div>`;
+  }).join('');
+
+  // ADD items
+  const addHtml = adds.length
+    ? adds.map(a => `<div class="suggest-item suggest-item-add">
+        <span class="suggest-sym suggest-sym-add">+${esc(a.symbol)}</span>
+        <div class="suggest-meta">
+          <span class="suggest-sector">${esc(a.sector||'')}</span>
+          <span class="suggest-reason">${esc(a.reason||'')}</span>
+        </div>
+        <span class="suggest-type-badge">${esc(a.trade_type||'短线')}</span>
+      </div>`).join('')
+    : '<div style="color:var(--t3);font-size:12px;padding:6px">暂无推荐</div>';
+
+  // REMOVE items
+  const removeHtml = removes.length
+    ? removes.map(r => `<div class="suggest-item suggest-item-rm">
+        <span class="suggest-sym suggest-sym-rm">−${esc(r.symbol)}</span>
+        <div class="suggest-meta">
+          <span class="suggest-reason">${esc(r.reason||'')}</span>
+        </div>
+      </div>`).join('')
+    : '<div style="color:var(--t3);font-size:12px;padding:6px">无需移除</div>';
+
+  el.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">
+        <span>📡 板块行情: ${esc(fromDate)} → ${esc(toDate)}</span>
+        <span style="font-size:11px;color:var(--t3)">${sectors.length}个ETF</span>
+      </div>
+      <div class="suggest-sector-row">${sectorHtml}</div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">
+        <span style="color:var(--green)">✅ 建议加入观察名单 (${adds.length}只)</span>
+        <span style="font-size:11px;color:var(--t3)">手动添加到左侧列表</span>
+      </div>
+      <div class="suggest-add-list">${addHtml}</div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">
+        <span style="color:var(--red)">❌ 建议移除 (${removes.length}只)</span>
+      </div>
+      <div class="suggest-rm-list">${removeHtml}</div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">
+        <span>🤖 Claude 完整分析报告</span>
+        <span style="font-size:11px;color:var(--t3)">含策略建议</span>
+      </div>
+      <div class="wr-ai-analysis">${_renderMarkdown(aiText)}</div>
+    </div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════
