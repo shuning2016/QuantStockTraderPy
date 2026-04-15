@@ -1146,7 +1146,8 @@ def dispatch(action: str, data: dict):
     if action == "stopBackground":
         return {"ok": True}
     if action == "triggerNow":
-        return run_trade_session(session_for_now(), "grok")
+        provider = data.get("provider", "grok")
+        return run_trade_session(session_for_now(), provider)
 
     # Session messages (keep compatible)
     if action == "getSessionMessages":
