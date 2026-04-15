@@ -300,9 +300,12 @@ def run_weekend_feedback(from_date: str,
             }
             continue
 
-        prompt    = build_feedback_prompt(provider, decisions, from_date, to_date)
-        # Use Claude as the meta-analyst for all providers for best narrative quality
-        ai_report = call_ai_fn(prompt, "claude")
+        prompt = build_feedback_prompt(provider, decisions, from_date, to_date)
+        try:
+            ai_report = call_ai_fn(prompt, "claude")
+        except Exception as e:
+            logger.error("AI feedback call failed for %s: %s", provider, e)
+            ai_report = f"[ERROR] 分析生成失败: {e}"
 
         good      = [d for d in decisions if d.get("quality") == "good"]
         bad       = [d for d in decisions if d.get("quality") == "bad"]

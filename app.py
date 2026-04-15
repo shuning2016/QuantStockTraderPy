@@ -1096,10 +1096,9 @@ def dispatch(action: str, data: dict):
 
     # ── Weekly feedback report ────────────────────────────────────
     if action == "getWeeklyFeedback":
-        today    = today_et()
-        # Allow caller to override date range; default = most recent Mon-Fri week
-        from_dt  = data.get("fromDate") or most_recent_week()[0]
-        to_dt    = data.get("toDate")   or most_recent_week()[1]
+        default_from, default_to = most_recent_week()
+        from_dt = data.get("fromDate") or default_from
+        to_dt   = data.get("toDate")   or default_to
         return read_log_range("feedback", from_dt, to_dt)
 
     if action == "runWeeklyFeedback":
@@ -1115,9 +1114,9 @@ def dispatch(action: str, data: dict):
 
     # ── Watchlist suggestions ─────────────────────────────────────
     if action == "getWatchlistSuggestions":
-        today   = today_et()
-        from_dt = data.get("fromDate") or most_recent_week()[0]
-        to_dt   = data.get("toDate")   or most_recent_week()[1]
+        default_from, default_to = most_recent_week()
+        from_dt = data.get("fromDate") or default_from
+        to_dt   = data.get("toDate")   or default_to
         return read_log_range("suggestions", from_dt, to_dt)
 
     if action == "runWatchlistSuggestions":
