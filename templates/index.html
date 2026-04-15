@@ -1243,7 +1243,7 @@ async function runWeeklyFeedback() {
     const result = await api('runWeeklyFeedback');
     const reports = result && result.reports ? Object.values(result.reports) : [];
     renderFeedbackReports(reports);
-    showToast('复盘报告生成完成');
+    toast('复盘报告生成完成');
   } catch(e) {
     el.innerHTML = `<div class="empty-panel" style="color:var(--red)">生成失败: ${esc(e.message)}</div>`;
   } finally {
@@ -1365,7 +1365,7 @@ async function runWatchlistSuggestions() {
   try {
     const result = await api('runWatchlistSuggestions');
     renderSuggestions(result);
-    showToast('选股建议生成完成');
+    toast('选股建议生成完成');
   } catch(e) {
     el.innerHTML = `<div class="empty-panel" style="color:var(--red)">生成失败: ${esc(e.message)}</div>`;
   } finally {
