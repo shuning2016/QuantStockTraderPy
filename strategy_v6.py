@@ -52,7 +52,7 @@ class CFG:
     MIN_RR               = 2.0     # minimum reward:risk ratio per trade (S1/D2)
     TRAIL_MIN_R_HIGH     = 0.75    # min R profit before trailing activates, C≥8 (G2/S4)
     TRAIL_MIN_R_LOW      = 0.50    # min R profit before trailing activates, C<8 (G2/S4)
-    CONF_MAX_STOP_PCT    = {6: 1.5, 7: 2.0, 8: 2.5}  # max stop% by confidence tier (D4)
+    CONF_MAX_STOP_PCT    = {6: 1.5, 7: 2.0, 8: 2.5, 9: 3.0}  # max stop% by confidence tier (D4)
 
 
 def new_trade_state() -> dict:
@@ -663,7 +663,7 @@ def _parse_vol_ratio(reason: str) -> Optional[float]:
 
 # ─── Section 9: Prompt Builder (A03+A10) ─────────────────────────
 _COMMON = ("风控: 仓位=净值×1%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止损-2%|硬止盈+5%\n"
-           "追踪: 盈≥1R→最高价-1.5ATR|盈≥2R→最高价-1.0ATR|禁扩止损/禁摊平\n"
+           "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-1.5ATR|盈≥2R→最高价-1.0ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
 _SCORE  = "▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
 _DEC    = ("DECISION:\n"
@@ -857,7 +857,8 @@ def execute_decisions(decisions: list, state: dict, session: str,
             shares = min(shares, sizing["shares"]) if shares > 0 else sizing["shares"]
 
             # D4: cap position size when ATR stop exceeds confidence-tier limit
-            max_stp = CFG.CONF_MAX_STOP_PCT.get(conf)
+            max_stp = CFG.CONF_MAX_STOP_PCT.get(min(conf, 9))
+            d4_note = ""
             if max_stp is not None:
                 actual_stop_pct = sizing["risk_per_share"] / price * 100 if price else 0
                 if actual_stop_pct > max_stp:
@@ -866,9 +867,7 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     capped = max(1, math.floor((nav * CFG.SINGLE_TRADE_RISK) / capped_risk))
                     capped = min(capped, math.floor((nav * CFG.MAX_SINGLE_RATIO) / price))
                     shares = min(shares, capped)
-                    executed.append(
-                        f"⚠️ {sym} C:{conf} ATR止损{actual_stop_pct:.1f}%>{max_stp}%上限"
-                        f"→仓位调整至{shares}股")
+                    d4_note = (f" [D4:止损{actual_stop_pct:.1f}%>{max_stp}%→调整至{shares}股]")
 
             rule   = check_position_rules(state, sym, shares, price)
             if rule["skip"]:
@@ -896,7 +895,7 @@ def execute_decisions(decisions: list, state: dict, session: str,
                 "realizedPnl": None, "reason": reason, "confidence": conf, "session": session,
             }, state))
             executed.append(f"✅ 买入 {sym} {shares}股 @${price:.2f} "
-                            f"花费${price*shares:.2f} C:{conf}/10 [{regime}]")
+                            f"花费${price*shares:.2f} C:{conf}/10 [{regime}]{d4_note}")
 
         elif action == "SELL":
             if sym not in holdings:
@@ -906,13 +905,15 @@ def execute_decisions(decisions: list, state: dict, session: str,
             # C2/S3: SWING exit lock — block AI sells that don't meet any valid exit condition
             if h.get("timeframe") == "SWING":
                 pnl_pct    = (price - h["avgCost"]) / h["avgCost"] * 100 if h["avgCost"] else 0
-                atop_hit   = price <= h.get("stopPrice", 0)
+                stop_price = h.get("stopPrice")
+                atop_hit   = (price <= stop_price) if stop_price is not None else True
                 chop_exit  = state.get("currentRegime") == "Chop"
                 profit_hit = pnl_pct >= CFG.HARD_PROFIT_PCT
                 if not (atop_hit or chop_exit or profit_hit):
+                    stop_str = f"${stop_price:.2f}" if stop_price is not None else "未设置"
                     executed.append(
                         f"⚠️ {sym} [SWING]过早出场被拦截 — "
-                        f"ATR止损未触(止损线${h.get('stopPrice', 0):.2f}) / 非Chop / 未达+{CFG.HARD_PROFIT_PCT}%止盈")
+                        f"ATR止损未触(止损线{stop_str}) / 非Chop / 未达+{CFG.HARD_PROFIT_PCT}%止盈")
                     continue
 
             # G3: flag prose-fallback parses so A07 excludes them
