@@ -48,6 +48,11 @@ class CFG:
     TARGET_SHARPE        = 1.0
     TARGET_PROFIT_FACTOR = 1.5
     TARGET_EV_MIN        = 0.0
+    COOLDOWN_DAYS        = 2       # trading days before same-symbol re-entry (D3/S2)
+    MIN_RR               = 2.0     # minimum reward:risk ratio per trade (S1/D2)
+    TRAIL_MIN_R_HIGH     = 0.75    # min R profit before trailing activates, C≥8 (G2/S4)
+    TRAIL_MIN_R_LOW      = 0.50    # min R profit before trailing activates, C<8 (G2/S4)
+    CONF_MAX_STOP_PCT    = {6: 1.5, 7: 2.0, 8: 2.5}  # max stop% by confidence tier (D4)
 
 
 def new_trade_state() -> dict:
@@ -62,6 +67,8 @@ def new_trade_state() -> dict:
         "regimeCandidate": "Trend",
         "regimeCandidateDays": 0,
         "feedbackBaseline": None,
+        "cooldowns": {},       # sym → last_exit_date_str (S2/D3)
+        "post_exit_watch": {}, # sym → exit info for 2-session outcome tracking (C5)
     }
 
 
@@ -177,11 +184,15 @@ def check_auto_stop_rules(state: dict, session: str) -> list:
         unr = (price - h["avgCost"]) / risk_per if risk_per else 0
 
         current_stop = h.get("stopPrice", h["avgCost"] - risk_per)
+        # G2/S4: only begin trailing after confidence-tiered profit threshold
+        conf_h = h.get("confidence", 6)
+        min_r_to_trail = CFG.TRAIL_MIN_R_HIGH if conf_h >= 8 else CFG.TRAIL_MIN_R_LOW
         new_stop = current_stop
-        if unr >= 2:
-            new_stop = max(new_stop, h["highPrice"] - atr * CFG.TRAIL_2R_MULT)
-        elif unr >= 1:
-            new_stop = max(new_stop, h["highPrice"] - atr * CFG.TRAIL_1R_MULT)
+        if unr >= min_r_to_trail:
+            if unr >= 2:
+                new_stop = max(new_stop, h["highPrice"] - atr * CFG.TRAIL_2R_MULT)
+            elif unr >= 1:
+                new_stop = max(new_stop, h["highPrice"] - atr * CFG.TRAIL_1R_MULT)
         if new_stop > h.get("stopPrice", float("-inf")):
             h["stopPrice"] = new_stop
 
@@ -228,7 +239,8 @@ def check_auto_stop_rules(state: dict, session: str) -> list:
 def calc_expectancy(trade_log: list) -> dict:
     closed = [e for e in trade_log
               if e.get("action", "").upper() == "SELL"
-              and e.get("realized_pnl") is not None]
+              and e.get("realized_pnl") is not None
+              and not e.get("parse_error")]  # G3: prose-fallback sells excluded
     if not closed:
         return {"expectancy": 0, "winRate": 0, "totalTrades": 0,
                 "avgWin": 0, "avgLoss": 0, "profitFactor": 0,
@@ -308,6 +320,41 @@ def check_feedback_trigger(state: dict) -> Optional[dict]:
         return {"needReview": True,
                 "reason": f"胜率下降{wr_drop*100:.0f}%（{baseline['winRate']}%→{metrics['winRate']}%）"}
     return None
+
+
+# ─── Section 6b: Post-Exit Outcome Tracking (C5) ─────────────────
+def check_post_exit_outcomes(state: dict) -> list:
+    """Call at session start after lastPrices is populated.
+    Compares current price against each watched exit; annotates the original
+    log entry and returns human-readable summary lines."""
+    notes = []
+    today = state.get("_today", "")
+    watch = state.get("post_exit_watch", {})
+    prices = state.get("lastPrices", {})
+    to_clear = []
+    for sym, info in list(watch.items()):
+        if not today or today <= info.get("exit_date", ""):
+            continue  # same session — check next time
+        if sym not in prices:
+            continue
+        cur = prices[sym]
+        exit_p = info["exit_price"]
+        pct = (cur - exit_p) / exit_p * 100 if exit_p else 0
+        correct = pct <= 0  # exit was right if price fell (or flat) after leaving
+        label = "正确✅" if correct else f"过早❌ 错失{pct:+.1f}%"
+        notes.append(
+            f"📊 {sym} 出场后复盘: 出场${exit_p:.2f}→现${cur:.2f} ({pct:+.1f}%) {label}"
+        )
+        for entry in state.get("log", []):
+            if entry.get("id") == info.get("log_id"):
+                entry["post_exit_price"]   = round(cur, 2)
+                entry["post_exit_pct"]     = round(pct, 2)
+                entry["post_exit_correct"] = correct
+                break
+        to_clear.append(sym)
+    for sym in to_clear:
+        del watch[sym]
+    return notes
 
 
 # ─── Section 7: Operating Rules (A09) ────────────────────────────
@@ -561,12 +608,78 @@ def parse_atr_from_text(ai_text: str, symbol: str) -> Optional[float]:
     return None  # R3: no global fallback — wrong symbol ATR is worse than None
 
 
+# ─── Execution helpers (parsers + cooldown) ──────────────────────
+
+def _business_days_since(exit_date_str: str, today_str: str) -> int:
+    """Count Mon–Fri trading days elapsed from exit_date up to and including today."""
+    try:
+        from datetime import date as _date, timedelta as _td
+        a = _date.fromisoformat(exit_date_str)
+        b = _date.fromisoformat(today_str)
+        if b <= a:
+            return 0
+        count, cur = 0, a + _td(days=1)
+        while cur <= b:
+            if cur.weekday() < 5:   # 0=Mon … 4=Fri
+                count += 1
+            cur += _td(days=1)
+        return count
+    except Exception:
+        return 99  # unparseable date → allow trade
+
+
+def _parse_timeframe(reason: str) -> str:
+    """Extract [SWING] or [INTRADAY] tag from DECISION reason.
+    Returns 'SWING', 'INTRADAY', or 'UNSET'."""
+    if re.search(r'\[SWING', reason, re.IGNORECASE):
+        return "SWING"
+    if re.search(r'\[INTRADAY', reason, re.IGNORECASE):
+        return "INTRADAY"
+    return "UNSET"
+
+
+def _parse_rr(reason: str) -> Optional[float]:
+    """Extract R:R ratio from DECISION reason.
+    Tries 'RR=X' label first; falls back to computing Target%/Stop%."""
+    m = re.search(r'(?:RR|R[:\s]R)\s*[=:\s]+(\d+\.?\d*)', reason, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    t_m = re.search(r'[Tt]arget[^|]{0,40}?\+(\d+\.?\d*)%', reason)
+    s_m = re.search(r'[Ss]top[^|]{0,40}?-(\d+\.?\d*)%', reason)
+    if t_m and s_m:
+        t, s = float(t_m.group(1)), float(s_m.group(1))
+        if s > 0:
+            return round(t / s, 2)
+    return None
+
+
+def _parse_vol_ratio(reason: str) -> Optional[float]:
+    """Extract volume ratio (e.g. 'Ratio: 2.3×') from DECISION reason."""
+    m = re.search(r'[Rr]atio\s*[:=]?\s*(\d+\.?\d*)\s*[×xX]?', reason)
+    if m:
+        return float(m.group(1))
+    return None
+
+
 # ─── Section 9: Prompt Builder (A03+A10) ─────────────────────────
 _COMMON = ("风控: 仓位=净值×1%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止损-2%|硬止盈+5%\n"
            "追踪: 盈≥1R→最高价-1.5ATR|盈≥2R→最高价-1.0ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
-_SCORE  = "▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价Y/N ③P(up)=0.X\n"
-_DEC    = "DECISION:\nBUY|SYM|N|信号类型+C:X+ATR=$X+止损=$X\nSELL|SYM|N|理由\nHOLD||0|原因\n"
+_SCORE  = "▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
+_DEC    = ("DECISION:\n"
+           "BUY|SYM|N|信号+C:X+ATR=$X+止损=$X(-Y%)+目标=$X(+Z%)+RR=W"
+           "+Vol:Xm/20d:Ym/Ratio:Z×|[SWING 2-5d]或[INTRADAY]\n"
+           "SELL|SYM|N|理由\nHOLD||0|原因\n")
+# S6: pre-entry checklist injected into opening and mid prompts
+_CHECKLIST = (
+    "⬛ 入场前六项确认（全部Y方可执行BUY，任一N=HOLD）:\n"
+    "① 置信度 C=X/10 ≥6 — Y/N\n"
+    "② 突破确认: 现价≥触发价 — Y/N\n"
+    "③ 量比: 今量Xm / 20日均Ym / 比值Z× ≥1.5× — Y/N\n"
+    "④ 风险收益比: 目标+X%÷止损-Y%=Z:1 ≥2.0 — Y/N\n"
+    "⑤ 时间框架: [INTRADAY]日内 或 [SWING 2-5d]隔夜 — 必须声明\n"
+    "⑥ 冷却期: 该标的上次出场[date/无], 已满48交易小时 — Y/N\n"
+)
 # Watchlist-only guard — injected into every session prompt to prevent the AI
 # from recommending stocks that are not in the user's monitored list.
 _WATCHLIST_GUARD = "⚠️ 严格限制：只分析上方列出的股票，严禁推荐或讨论观察列表以外的任何股票。\n"
@@ -590,15 +703,17 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
         return (f"量化交易员 10:00ET 开盘30min后 最佳入场时段\n\n账户: {portfolio}\n\n"
                 f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
                 + _WATCHLIST_GUARD
-                + _COMMON + _SCORE + "\n" + _DEC + "\nNEXT_ACTION: 下一步观察重点")
+                + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n" + _DEC
+                + "\nNEXT_ACTION: 下一步观察重点")
     if session == "mid":
         return (f"量化交易员 12:00ET 中盘复盘\n\n账户: {portfolio}\n\n"
                 f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}\n\n"
                 + _WATCHLIST_GUARD
                 + _COMMON
                 + "持仓评估: ▸ SYM|盈亏%|≈XR|止损=$X|建议\n\n"
-                "DECISION:\nSELL|SYM|N|理由\nBUY|SYM|N|信号+C:X\nHOLD||0|说明\n\n"
-                "NEXT_ACTION: 收尾策略")
+                + _CHECKLIST + "\n"
+                + _DEC
+                + "\nNEXT_ACTION: 收尾策略")
     if session == "closing":
         return (f"量化交易员 15:30ET 收尾｜禁新开仓\n\n账户: {portfolio}\n\n"
                 f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}\n\n"
@@ -648,6 +763,7 @@ def build_trade_log_entry(action: str, trade_info: dict, state: dict, tag: str =
         "entry_atr": h.get("entryAtr"), "confidence": trade_info.get("confidence"),
         "is_plan_trade": plan, "is_fomo": fomo, "violation": viol,
         "exit_tag": tag or None, "reason": trade_info.get("reason", ""),
+        "parse_error": trade_info.get("parse_error", False),  # G3: prose-fallback SELL flag
     }
 
 
@@ -668,9 +784,10 @@ def execute_decisions(decisions: list, state: dict, session: str,
         sym = s["sym"]
         if sym not in holdings:
             continue
-        h     = holdings[sym]
-        price = prices.get(sym, h["avgCost"])
-        real  = (price - h["avgCost"]) * s["shares"]
+        h        = holdings[sym]
+        avg_cost = h["avgCost"]
+        price    = prices.get(sym, avg_cost)
+        real     = (price - avg_cost) * s["shares"]
         entry = build_trade_log_entry("sell", {
             "sym": sym, "shares": s["shares"], "price": price,
             "realizedPnl": real, "reason": s["reason"], "session": session,
@@ -683,6 +800,14 @@ def execute_decisions(decisions: list, state: dict, session: str,
             del holdings[sym]
         else:
             h["shares"] -= s["shares"]
+        # S2/D3: start cooldown clock after any system exit
+        state.setdefault("cooldowns", {})[sym] = today
+        # C5: register for post-exit outcome check next session
+        state.setdefault("post_exit_watch", {})[sym] = {
+            "exit_price": price, "exit_date": today, "avg_cost": avg_cost,
+            "pnl_pct": round((price - avg_cost) / avg_cost * 100, 2) if avg_cost else 0,
+            "log_id": log[-1]["id"] if log else None,
+        }
         sign = "盈" if real >= 0 else "亏"
         executed.append(f"✅ 系统{s.get('tag','')} {sym} {s['shares']}股 @${price:.2f} "
                         f"{sign}${abs(real):.2f}")
@@ -712,9 +837,39 @@ def execute_decisions(decisions: list, state: dict, session: str,
             min_conf = CFG.SCORE_MIN_TRANSITION if regime == "Transition" else CFG.SCORE_MIN_NORMAL
             if conf < min_conf:
                 executed.append(f"⚠️ {sym} 置信度C:{conf}<{min_conf}，跳过"); continue
+            # S2/D3: 48-hour same-symbol cooldown
+            last_exit = state.get("cooldowns", {}).get(sym)
+            if last_exit and today and _business_days_since(last_exit, today) < CFG.COOLDOWN_DAYS:
+                executed.append(f"⚠️ {sym} 冷却期（上次出场:{last_exit}，需满{CFG.COOLDOWN_DAYS}交易日），跳过"); continue
+
+            # S1/D2: minimum R:R gate
+            rr = _parse_rr(reason)
+            if rr is not None and rr < CFG.MIN_RR:
+                executed.append(f"⚠️ {sym} RR={rr:.2f}<{CFG.MIN_RR:.1f}最低要求，跳过"); continue
+
+            # D5/S5: volume ratio confirmation
+            vol_ratio = _parse_vol_ratio(reason)
+            if vol_ratio is not None and vol_ratio < CFG.VOLUME_MULT:
+                executed.append(f"⚠️ {sym} 量比{vol_ratio:.1f}×<{CFG.VOLUME_MULT}×要求，跳过"); continue
+
             atr    = atr_estimates.get(sym, price * 0.02)
             sizing = calc_position_size(calc_nav(state), price, atr, regime)
             shares = min(shares, sizing["shares"]) if shares > 0 else sizing["shares"]
+
+            # D4: cap position size when ATR stop exceeds confidence-tier limit
+            max_stp = CFG.CONF_MAX_STOP_PCT.get(conf)
+            if max_stp is not None:
+                actual_stop_pct = sizing["risk_per_share"] / price * 100 if price else 0
+                if actual_stop_pct > max_stp:
+                    capped_risk = price * max_stp / 100
+                    nav = calc_nav(state)
+                    capped = max(1, math.floor((nav * CFG.SINGLE_TRADE_RISK) / capped_risk))
+                    capped = min(capped, math.floor((nav * CFG.MAX_SINGLE_RATIO) / price))
+                    shares = min(shares, capped)
+                    executed.append(
+                        f"⚠️ {sym} C:{conf} ATR止损{actual_stop_pct:.1f}%>{max_stp}%上限"
+                        f"→仓位调整至{shares}股")
+
             rule   = check_position_rules(state, sym, shares, price)
             if rule["skip"]:
                 executed.append(f"⚠️ {sym}: {rule['reason']}"); continue
@@ -732,7 +887,9 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     "stopPrice": sizing["stop_price"],
                     "entryAtr": atr, "riskPerShare": sizing["risk_per_share"],
                     "highPrice": price,
-                    "entryTime": state.get("_nowET", ""),  # ET "HH:MM" for 30-min hard-stop guard
+                    "entryTime":  state.get("_nowET", ""),  # ET "HH:MM" for 30-min guard
+                    "confidence": conf,                     # G2/S4: trailing tier
+                    "timeframe":  _parse_timeframe(reason), # C1/C2/S3: SWING exit lock
                 }
             log.append(build_trade_log_entry("buy", {
                 "sym": sym, "shares": shares, "price": price,
@@ -745,22 +902,49 @@ def execute_decisions(decisions: list, state: dict, session: str,
             if sym not in holdings:
                 executed.append(f"⚠️ {sym} 未持仓，跳过"); continue
             h = holdings[sym]
-            sell_sh = min(shares, h["shares"]) if shares > 0 else h["shares"]
-            real    = (price - h["avgCost"]) * sell_sh
+
+            # C2/S3: SWING exit lock — block AI sells that don't meet any valid exit condition
+            if h.get("timeframe") == "SWING":
+                pnl_pct    = (price - h["avgCost"]) / h["avgCost"] * 100 if h["avgCost"] else 0
+                atop_hit   = price <= h.get("stopPrice", 0)
+                chop_exit  = state.get("currentRegime") == "Chop"
+                profit_hit = pnl_pct >= CFG.HARD_PROFIT_PCT
+                if not (atop_hit or chop_exit or profit_hit):
+                    executed.append(
+                        f"⚠️ {sym} [SWING]过早出场被拦截 — "
+                        f"ATR止损未触(止损线${h.get('stopPrice', 0):.2f}) / 非Chop / 未达+{CFG.HARD_PROFIT_PCT}%止盈")
+                    continue
+
+            # G3: flag prose-fallback parses so A07 excludes them
+            parse_err = d.get("parse_mode") == "prose_fallback"
+
+            avg_cost = h["avgCost"]
+            sell_sh  = min(shares, h["shares"]) if shares > 0 else h["shares"]
+            real     = (price - avg_cost) * sell_sh
             state["cash"] += price * sell_sh
             today_trades[tk] = today_trades.get(tk, 0) + 1
             state.setdefault("dailyPnL", {})[today] = (
                 state["dailyPnL"].get(today, 0) + real)
             log.append(build_trade_log_entry("sell", {
                 "sym": sym, "shares": sell_sh, "price": price,
-                "realizedPnl": real, "reason": reason, "confidence": conf, "session": session,
+                "realizedPnl": real, "reason": reason, "confidence": conf,
+                "session": session, "parse_error": parse_err,
             }, state))
             if sell_sh >= h["shares"]:
                 del holdings[sym]
             else:
                 h["shares"] -= sell_sh
-            sign = "盈" if real >= 0 else "亏"
-            executed.append(f"✅ 卖出 {sym} {sell_sh}股 @${price:.2f} {sign}${abs(real):.2f}")
+            # S2/D3: start cooldown clock
+            state.setdefault("cooldowns", {})[sym] = today
+            # C5: register for post-exit outcome check next session
+            state.setdefault("post_exit_watch", {})[sym] = {
+                "exit_price": price, "exit_date": today, "avg_cost": avg_cost,
+                "pnl_pct": round((price - avg_cost) / avg_cost * 100, 2) if avg_cost else 0,
+                "log_id": log[-1]["id"] if log else None,
+            }
+            sign  = "盈" if real >= 0 else "亏"
+            extra = " ⚠️[prose解析,不计入A07]" if parse_err else ""
+            executed.append(f"✅ 卖出 {sym} {sell_sh}股 @${price:.2f} {sign}${abs(real):.2f}{extra}")
 
     if len(log) > 500:
         state["log"] = log[-500:]
