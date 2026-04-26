@@ -385,11 +385,69 @@ def get_stock_quote(sym: str) -> dict:
         dp  = q.get("c", 0) or q.get("pc", 0)
         res = {"c": dp, "d": q.get("d"), "dp": q.get("dp"),
                "h": q.get("h"), "l": q.get("l"), "o": q.get("o"), "pc": q.get("pc"),
+               # STRATEGY-1: include current-day volume so watchlist text can show
+               # Vol for the AI's ② volume condition check (was missing before)
+               "v": q.get("v", 0),
                "isRealtime": bool(q.get("c", 0)), "type": "stock", "_ts": time.time()}
         _price_cache[sym] = res
         return res
     except Exception:
         return None
+
+_atr_cache: dict = {}   # sym → {"atr": float, "_ts": float}
+_ATR_CACHE_TTL = 3600  # 1 hour — ATR changes slowly intraday
+
+def get_stock_atr(sym: str, price: float) -> float:
+    """
+    STRATEGY-5: Compute a server-side 14-period ATR from Finnhub daily candles.
+
+    Uses a simplified Wilder ATR: average of 14 true-ranges (high-low) from
+    the most recent 20 trading days.  Falls back gracefully:
+      1. Finnhub candle data (preferred — actual OHLCV)
+      2. Today's intraday high-low range × 1.3 (rough multiplier to
+         approximate a full-day ATR from a partial session range)
+      3. 1.5 % of price (original stub — last resort)
+    Result is cached for 1 hour to avoid repeated API calls per session.
+    """
+    cached = _atr_cache.get(sym)
+    if cached and (time.time() - cached["_ts"]) < _ATR_CACHE_TTL:
+        return cached["atr"]
+
+    atr: float = price * 0.015   # fallback: 1.5% of price
+
+    try:
+        import math as _math
+        end_ts   = int(time.time())
+        start_ts = end_ts - 30 * 86400  # 30 calendar days → ≈20 trading days
+        url = (f"https://finnhub.io/api/v1/stock/candle"
+               f"?symbol={sym}&resolution=D&from={start_ts}&to={end_ts}"
+               f"&token={FINNHUB_KEY}")
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            highs  = data.get("h", [])
+            lows   = data.get("l", [])
+            closes = data.get("c", [])
+            if len(highs) >= 2:
+                true_ranges = []
+                for j in range(1, min(15, len(highs))):
+                    tr = max(
+                        highs[j] - lows[j],                    # high - low
+                        abs(highs[j] - closes[j - 1]),         # high - prev close
+                        abs(lows[j]  - closes[j - 1]),         # low  - prev close
+                    )
+                    true_ranges.append(tr)
+                if true_ranges:
+                    atr = sum(true_ranges) / len(true_ranges)
+    except Exception as e:
+        _logging.getLogger("quant.atr").warning(
+            "get_stock_atr: candle fetch failed for %s (%s), using fallback", sym, e)
+
+    # Sanity clamp: ATR must be 0.3%–8% of price
+    atr = max(price * 0.003, min(price * 0.08, atr))
+    _atr_cache[sym] = {"atr": round(atr, 4), "_ts": time.time()}
+    return atr
+
 
 COIN_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin",
@@ -579,7 +637,21 @@ def call_ai(prompt: str, provider: str = "grok") -> str:
 def run_trade_session(session: str, provider: str) -> dict:
     state = load_trade_state(provider)
     stocks = load_watchlist()
-    stock_items = [s for s in stocks if s.get("type") == "stock"]
+    all_stock_items = [s for s in stocks if s.get("type") == "stock"]
+
+    # STRATEGY-3: cap the active watchlist to MAX_WATCHLIST_STOCKS.
+    # Feeding too many stocks into a single prompt overwhelms smaller models
+    # (grok-3-mini, deepseek-chat), causing them to skip most candidates and
+    # default to HOLD. Users should order their watchlist by priority; the
+    # first N entries are always analysed.
+    stock_items = all_stock_items[:CFG.MAX_WATCHLIST_STOCKS]
+    if len(all_stock_items) > CFG.MAX_WATCHLIST_STOCKS:
+        _logging.getLogger("quant.session").info(
+            "[%s/%s] Watchlist capped: %d → %d stocks (MAX_WATCHLIST_STOCKS=%d). "
+            "Reorder watchlist in UI to prioritise different stocks.",
+            provider, session,
+            len(all_stock_items), len(stock_items), CFG.MAX_WATCHLIST_STOCKS,
+        )
 
     # Guard: abort early if watchlist is empty so we never send a blank prompt.
     # Root cause is usually a Vercel cold start wiping /tmp before KV was set up —
@@ -602,16 +674,21 @@ def run_trade_session(session: str, provider: str) -> dict:
     state["_nowET"]  = now.strftime("%H:%M")
     state["provider"] = provider
 
-    # Fetch prices
+    # Fetch prices + server-side ATR estimates
     prices = {}
     atr_est = {}
     for s in stock_items:
         q = get_stock_quote(s["symbol"])
         if q:
-            prices[s["symbol"]] = q.get("c", q.get("pc", 0))
-            state.setdefault("lastPrices", {})[s["symbol"]] = prices[s["symbol"]]
-            # Rough ATR estimate: 1% of price (will be refined by AI)
-            atr_est[s["symbol"]] = prices[s["symbol"]] * 0.01
+            price = q.get("c", q.get("pc", 0))
+            prices[s["symbol"]] = price
+            state.setdefault("lastPrices", {})[s["symbol"]] = price
+
+            # BUG-1b / STRATEGY-5: replace the old 1%-of-price stub with a
+            # genuine server-side ATR.  get_stock_atr() tries Finnhub daily
+            # candles first, then falls back to intraday high-low × 1.3,
+            # then 1.5% of price — all with a 0.3%–8% sanity clamp.
+            atr_est[s["symbol"]] = get_stock_atr(s["symbol"], price)
 
     # Fetch news
     news_data = get_news_for_items(stock_items, 3)
@@ -632,13 +709,23 @@ def run_trade_session(session: str, provider: str) -> dict:
                            f"现价${price:.2f} {pnl:+.1f}% 止损${h.get('stopPrice',0):.2f}")
         portfolio_txt += "\n持仓: " + " | ".join(h_parts)
 
+    # STRATEGY-1: include current-day volume (millions) and today's ATR estimate
+    # so the AI can verify entry condition ② 量价 without guessing.
+    # Format: AAPL $269.59 (+0.15%) Vol:32.1M ATR≈$4.23
     wl_parts = []
     for s in stock_items:
-        q = get_single_quote(s["symbol"], "stock")
+        sym = s["symbol"]
+        q   = get_single_quote(sym, "stock")
         if q:
-            wl_parts.append(f"{s['symbol']} ${q.get('c',0):.2f} ({q.get('dp',0):+.2f}%)")
+            vol_m  = (q.get("v") or 0) / 1_000_000          # shares → millions
+            atr_d  = atr_est.get(sym, 0)
+            vol_str = f" Vol:{vol_m:.1f}M" if vol_m > 0 else ""
+            atr_str = f" ATR≈${atr_d:.2f}" if atr_d > 0 else ""
+            wl_parts.append(
+                f"{sym} ${q.get('c', 0):.2f} ({q.get('dp', 0):+.2f}%){vol_str}{atr_str}"
+            )
         else:
-            wl_parts.append(s["symbol"])
+            wl_parts.append(sym)
     watchlist_txt = "\n".join(wl_parts)
 
     news_parts = []
@@ -657,8 +744,17 @@ def run_trade_session(session: str, provider: str) -> dict:
                      for e in today_log[-5:]]
         log_summary = "\n".join(log_parts) or "今日无交易"
 
+    # S2_handoff: inject premarket NEXT_ACTION as focus_note for opening session.
+    # Each session is a fresh AI call with no memory, so we persist the
+    # premarket analysis note in state and forward it to the opening prompt.
+    focus_note = ""
+    if session == "opening":
+        saved = state.get("premarket_focus", "")
+        if saved:
+            focus_note = f"\n\n📌 盘前分析重点: {saved}"
+
     prompt = build_prompt_v6(session, portfolio_txt, watchlist_txt,
-                              news_txt, log_summary)
+                              news_txt, log_summary, focus_note)
 
     # Call AI
     ai_text = call_ai(prompt, provider)
@@ -666,6 +762,20 @@ def run_trade_session(session: str, provider: str) -> dict:
     # Parse regime from AI response and update state
     regime_str, spy_adx, spy_above = parse_regime_from_text(ai_text)
     get_market_regime(state, spy_adx, spy_above)
+
+    # S2_handoff: persist the premarket NEXT_ACTION for the opening session.
+    # We extract the first non-empty line after "NEXT_ACTION:" and store it
+    # in state so run_trade_session for "opening" can inject it as focus_note.
+    if session == "premarket" and not ai_text.startswith("[ERROR]"):
+        na_m = re.search(r'NEXT_ACTION\s*[：:]\s*(.+)', ai_text)
+        if na_m:
+            state["premarket_focus"] = na_m.group(1).strip()[:200]
+            _logging.getLogger("quant.session").info(
+                "[%s/premarket] Saved focus note: %s",
+                provider, state["premarket_focus"],
+            )
+        else:
+            state.pop("premarket_focus", None)   # clear stale note from prior day
 
     # Parse ATR estimates from AI text
     for s in stock_items:
@@ -714,18 +824,33 @@ def run_trade_session(session: str, provider: str) -> dict:
         for d in decisions:
             if d["symbol"]:
                 d["confidence"] = parse_confidence_score(ai_text, d["symbol"])
-                # Bug-fix: if AI gave a structured BUY but omitted "C:X/10",
-                # parse_confidence_score returns 0 which always fails the gate (0 < 6).
-                # For structured decisions, treat a missing score as neutral (= threshold),
-                # so the trade is allowed through rather than silently blocked.
-                if (d["confidence"] == 0
-                        and d["action"] == "BUY"
-                        and d.get("parse_mode") == "structured"):
-                    d["confidence"] = CFG.SCORE_MIN_NORMAL
-                    _logger.info(
-                        "[%s/%s] %s: no C:X/10 found — defaulting confidence to %d",
-                        provider, session, d["symbol"], CFG.SCORE_MIN_NORMAL,
-                    )
+                if d["confidence"] == 0 and d.get("parse_mode") == "structured":
+                    if d["action"] == "BUY":
+                        # BUG-2 (BUY side): AI gave a structured BUY but omitted
+                        # "C:X/10".  parse_confidence_score returns 0, which would
+                        # always fail the gate (0 < 6).  Default to threshold so the
+                        # trade is evaluated by all other rules rather than silently
+                        # blocked by a missing format field.
+                        d["confidence"] = CFG.SCORE_MIN_NORMAL
+                        _logger.info(
+                            "[%s/%s] %s: BUY — no C:X/10 found, defaulting to C:%d",
+                            provider, session, d["symbol"], CFG.SCORE_MIN_NORMAL,
+                        )
+                    elif d["action"] == "SELL":
+                        # BUG-2 (SELL side): SELL decisions never had a confidence
+                        # fallback, so the trade log always recorded confidence=0 for
+                        # every sell, corrupting A07 calibration data.
+                        # Fix: carry forward the entry confidence from holdings so the
+                        # sell log reflects the actual conviction level of the position.
+                        held_conf = (state.get("holdings", {})
+                                     .get(d["symbol"], {})
+                                     .get("confidence", CFG.SCORE_MIN_NORMAL))
+                        d["confidence"] = held_conf
+                        _logger.info(
+                            "[%s/%s] %s: SELL — no C:X/10 found, "
+                            "inherited entry confidence C:%d from holdings",
+                            provider, session, d["symbol"], held_conf,
+                        )
 
         # Log pre-execution state
         _logger.info("[%s/%s] pre-exec state: cash=$%.2f holdings=%s regime=%s",

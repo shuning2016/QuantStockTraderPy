@@ -49,8 +49,8 @@ MODELS = {
         "display":  "Claude",
     },
     "grok": {
-        "model":    "grok-3-mini",
-        "api_url":  "https://api.x.ai/v1/chat/completions",
+        "model":    "grok-3",          # STRATEGY-4: upgraded from grok-3-mini; full model
+        "api_url":  "https://api.x.ai/v1/chat/completions",  # produces better multi-stock analysis
         "env_key":  "GROK_KEY",
         "display":  "Grok",
     },
@@ -62,7 +62,8 @@ MODELS = {
     },
 }
 
-MAX_TOKENS = 2000   # max tokens for every AI call
+MAX_TOKENS = 4000   # max tokens for every AI call (STRATEGY-3: raised from 2000 to avoid
+                    # response truncation mid-DECISION when analysing 6-stock watchlist)
 
 # ── Data feed URLs ────────────────────────────────────────────────
 FINNHUB_QUOTE_URL   = "https://finnhub.io/api/v1/quote"

@@ -18,13 +18,13 @@ class CFG:
     version              = "v6.0"
     INITIAL_CASH         = 10_000.0
     MIN_CASH_RATIO       = 0.00
-    MAX_SINGLE_RATIO     = 0.10     # max 10% NAV per trade
-    MAX_HOLDINGS         = 8
-    SINGLE_TRADE_RISK    = 0.01     # risk 1% NAV per trade
+    MAX_SINGLE_RATIO     = 0.20     # STRATEGY-2: raised 10%→20% NAV per trade so position
+    MAX_HOLDINGS         = 8        # sizes are meaningful on a $10 K account
+    SINGLE_TRADE_RISK    = 0.015    # STRATEGY-2: raised 1%→1.5% NAV risk per trade ($150)
     ATR_PERIOD           = 14
     STOP_ATR_MULT        = 1.5
-    TRAIL_1R_MULT        = 1.5
-    TRAIL_2R_MULT        = 1.0
+    TRAIL_1R_MULT        = 2.0      # BUG-3: raised 1.5→2.0 — gives winning trades room to
+    TRAIL_2R_MULT        = 1.5      # BUG-3: raised 1.0→1.5   breathe without premature stop-out
     HARD_STOP_PCT        = 2.0
     HARD_PROFIT_PCT      = 5.0
     BREAKOUT_LOOKBACK    = 20
@@ -52,7 +52,13 @@ class CFG:
     MIN_RR               = 2.0     # minimum reward:risk ratio per trade (S1/D2)
     TRAIL_MIN_R_HIGH     = 0.75    # min R profit before trailing activates, C≥8 (G2/S4)
     TRAIL_MIN_R_LOW      = 0.50    # min R profit before trailing activates, C<8 (G2/S4)
-    CONF_MAX_STOP_PCT    = {6: 1.5, 7: 2.0, 8: 2.5, 9: 3.0}  # max stop% by confidence tier (D4)
+    # BUG-4: added keys 0–5 (all map to 0.0) so D4 hard-blocks any trade that somehow
+    # reaches execution with confidence below the gate threshold (previously .get() returned
+    # None for conf<6, silently skipping the cap and allowing unlimited stop size).
+    CONF_MAX_STOP_PCT    = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0,
+                            6: 1.5, 7: 2.0, 8: 2.5, 9: 3.0}
+    MAX_WATCHLIST_STOCKS = 6       # STRATEGY-3: cap AI input to 6 stocks to reduce cognitive
+                                   # load and prevent truncated responses on mini models
 
 
 def new_trade_state() -> dict:
@@ -588,24 +594,66 @@ def parse_regime_from_text(ai_text: str) -> tuple:
 
 def parse_atr_from_text(ai_text: str, symbol: str) -> Optional[float]:
     """
-    Extract ATR value from AI text.
-    H5 fix: use non-greedy match + explicit decimal pattern to avoid
-    dropping decimal part (e.g. "$1.50" should not be captured as "1").
-    Pattern: ATR ... $? digits.digits (require at least one decimal digit).
+    Extract the ATR dollar value from AI text for the given symbol.
+
+    BUG-1 fixes applied:
+    R1 — Context window: scans ±1 line around each symbol mention so an ATR
+         value written on the next line is still attributed to this symbol.
+    R2 — Sanity gate: only accepts values in the 0.3%–8% range relative to
+         the stock price found in the same window. This rejects stop-prices,
+         share prices, and percentage-values mis-captured as dollar amounts.
+    R3 — No global fallback: wrong-symbol ATR causes worse sizing errors than
+         returning None and falling back to the server-side estimate.
     """
-    # Precise pattern: ATR followed by optional text, then $N.NN
-    _atr_pat = re.compile(
-        r'ATR[^\n]{0,60}?\$?\s*(\d+\.\d+|\d+)',
-        re.IGNORECASE
-    )
-    for line in ai_text.split('\n'):
-        if symbol.upper() in line.upper():
-            m = _atr_pat.search(line)
-            if m:
-                val = float(m.group(1).replace(",", ""))
-                if val > 0:
-                    return val
-    return None  # R3: no global fallback — wrong symbol ATR is worse than None
+    _atr_pat   = re.compile(r'ATR[^\n]{0,80}?\$?\s*(\d+\.\d+|\d+)', re.IGNORECASE)
+    _price_pat = re.compile(r'\$\s*(\d{2,5}\.\d{1,4})')   # $NN.NN–$NNNNN.NNNN
+
+    lines = ai_text.split('\n')
+    for i, line in enumerate(lines):
+        if symbol.upper() not in line.upper():
+            continue
+
+        # 3-line context window centred on the symbol line (R1)
+        window_lines = lines[max(0, i - 1): min(len(lines), i + 2)]
+        window = '\n'.join(window_lines)
+
+        # Find a plausible stock price in the window for the sanity gate
+        price_hint: Optional[float] = None
+        for pm in _price_pat.finditer(window):
+            candidate = float(pm.group(1))
+            if candidate > 5:          # ignore sub-$5 — unlikely to be the stock price
+                price_hint = candidate
+                break
+
+        m = _atr_pat.search(window)
+        if not m:
+            continue
+
+        val = float(m.group(1).replace(",", ""))
+        if val <= 0:
+            continue
+
+        # ── Sanity gate (R2) ─────────────────────────────────────────
+        if price_hint and price_hint > 0:
+            ratio = val / price_hint
+            if not (0.003 <= ratio <= 0.08):
+                # Value outside realistic ATR band (0.3%–8% of price).
+                # Common false-positives: stop price captured as ATR,
+                # or percentage string (e.g. "2.3%") read as dollar value.
+                _logging.getLogger("quant.atr").debug(
+                    "parse_atr_from_text: %s rejected val=%.4f "
+                    "(ratio=%.2f%% vs price_hint=%.2f)",
+                    symbol, val, ratio * 100, price_hint,
+                )
+                continue
+        else:
+            # No price reference found — use absolute $50 cap as safety net
+            if val > 50:
+                continue
+
+        return val
+
+    return None  # R3: no global fallback
 
 
 # ─── Execution helpers (parsers + cooldown) ──────────────────────
@@ -662,14 +710,17 @@ def _parse_vol_ratio(reason: str) -> Optional[float]:
 
 
 # ─── Section 9: Prompt Builder (A03+A10) ─────────────────────────
-_COMMON = ("风控: 仓位=净值×1%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止损-2%|硬止盈+5%\n"
-           "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-1.5ATR|盈≥2R→最高价-1.0ATR|禁扩止损/禁摊平\n"
+_COMMON = ("风控: 仓位=净值×1.5%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止损-2%|硬止盈+5%\n"
+           # BUG-3: trailing multipliers updated to 2.0/1.5 — prompt kept in sync
+           "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-2.0ATR|盈≥2R→最高价-1.5ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
 _SCORE  = "▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
 _DEC    = ("DECISION:\n"
-           "BUY|SYM|N|信号+C:X+ATR=$X+止损=$X(-Y%)+目标=$X(+Z%)+RR=W"
+           "BUY|SYM|N|信号+C:X/10+ATR=$X+止损=$X(-Y%)+目标=$X(+Z%)+RR=W"
            "+Vol:Xm/20d:Ym/Ratio:Z×|[SWING 2-5d]或[INTRADAY]\n"
-           "SELL|SYM|N|理由\nHOLD||0|原因\n")
+           # BUG-2: SELL must include |C:X/10 so parse_confidence_score can extract it;
+           # without this the sell log always records confidence=0, corrupting A07 feedback.
+           "SELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n")
 # S6: pre-entry checklist injected into opening and mid prompts
 _CHECKLIST = (
     "⬛ 入场前六项确认（全部Y方可执行BUY，任一N=HOLD）:\n"
@@ -684,9 +735,19 @@ _CHECKLIST = (
 # from recommending stocks that are not in the user's monitored list.
 _WATCHLIST_GUARD = "⚠️ 严格限制：只分析上方列出的股票，严禁推荐或讨论观察列表以外的任何股票。\n"
 
+# D6: self-review rule injected before every BUY decision block.
+# Forces the AI to pause and verify it is not re-entering a symbol it just exited.
+_D6_SELF_REVIEW = (
+    "⬛ 同标的再入场自查（在任何BUY前执行）:\n"
+    "若该标的今日或昨日有过出场记录，请用2句话说明本次信号与上次出场时的本质区别"
+    "（不同技术位/不同催化剂/不同时间框架）。若无法写出2条实质差异，输出HOLD。\n"
+)
+
 
 def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
-                    news_summary: str, log_summary: str = "", focus_note: str = "") -> str:
+                    news_summary: str, log_summary: str = "",
+                    focus_note: str = "") -> str:
+    """Build the session prompt.  All parameters are backward-compatible."""
     if session == "premarket":
         return (f"量化交易员 9:15ET 盘前｜只分析不交易\n\n账户: {portfolio}\n\n"
                 f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
@@ -703,7 +764,9 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
         return (f"量化交易员 10:00ET 开盘30min后 最佳入场时段\n\n账户: {portfolio}\n\n"
                 f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
                 + _WATCHLIST_GUARD
-                + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n" + _DEC
+                + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n"
+                + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
+                + _DEC
                 + "\nNEXT_ACTION: 下一步观察重点")
     if session == "mid":
         return (f"量化交易员 12:00ET 中盘复盘\n\n账户: {portfolio}\n\n"
@@ -712,6 +775,7 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + _COMMON
                 + "持仓评估: ▸ SYM|盈亏%|≈XR|止损=$X|建议\n\n"
                 + _CHECKLIST + "\n"
+                + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
                 + _DEC
                 + "\nNEXT_ACTION: 收尾策略")
     if session == "closing":
@@ -720,7 +784,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + _WATCHLIST_GUARD
                 + "过夜4条件: ①当日盈利 ②无重大宏观 ③无隔夜财报 ④Regime≠Chop\n\n"
                 "每仓: ▸ SYM|盈亏%|XR|决定:过夜/平仓|理由\n\n"
-                "DECISION:\nSELL|SYM|N|理由\nHOLD||0|原因\n\n"
+                # BUG-2: closing SELL must also carry C:X/10 so confidence is logged
+                "DECISION:\nSELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n\n"
                 "NEXT_ACTION: 明日盘前重点")
     return ""
 
@@ -791,6 +856,9 @@ def execute_decisions(decisions: list, state: dict, session: str,
         entry = build_trade_log_entry("sell", {
             "sym": sym, "shares": s["shares"], "price": price,
             "realizedPnl": real, "reason": s["reason"], "session": session,
+            # BUG-2: carry the entry confidence into the system-exit log so A07
+            # feedback can correctly attribute outcomes to the right confidence tier
+            "confidence": h.get("confidence", 0),
         }, state, s.get("tag", ""))
         log.append(entry)
         state["cash"] += price * s["shares"]
