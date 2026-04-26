@@ -38,6 +38,7 @@ from weekly_review import (
     run_weekend_feedback,
     run_watchlist_suggestions,
 )
+from daily_review import run_daily_review
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.urandom(24)
@@ -956,6 +957,58 @@ def index():
     html_path = Path(__file__).parent / "templates" / "index.html"
     return Response(html_path.read_text(encoding="utf-8"),
                     mimetype="text/html")
+
+
+# ─── Daily Execution Health Check ────────────────────────────────
+# Manual trigger only — run after market close each day to detect
+# execution bugs before they repeat across multiple sessions.
+#
+# Usage:
+#   GET /api/daily-review              →  today's report
+#   GET /api/daily-review/2026-04-26   →  specific date
+#
+# Returns JSON with all 10 check results + human-readable report_text.
+# To view the plain-text report in a terminal:
+#   curl -s https://your-app.vercel.app/api/daily-review | python3 -m json.tool | grep -A1 report_text
+
+@app.route("/api/daily-review", methods=["GET"])
+@app.route("/api/daily-review/<date>", methods=["GET"])
+def api_daily_review(date: str = None):
+    """
+    Run the 10-check execution health report for a given date (default: today).
+
+    Query params:
+      format=text   → returns plain-text report instead of JSON (easier to read)
+
+    The report checks execution health only — no strategy decisions are made.
+    """
+    if date is None:
+        date = today_et()
+
+    # Validate date format
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": f"Invalid date format: '{date}'. Use YYYY-MM-DD."}), 400
+
+    try:
+        result = run_daily_review(
+            date         = date,
+            read_log_fn  = read_log_range,
+            load_state_fn= load_trade_state,
+            watchlist    = load_watchlist(),
+        )
+
+        # Optional plain-text mode for easy terminal reading
+        if request.args.get("format") == "text":
+            return Response(result["report_text"], mimetype="text/plain; charset=utf-8")
+
+        return jsonify(result)
+
+    except Exception as e:
+        _logging.getLogger(__name__).error("Daily review failed for %s: %s", date, e,
+                                           exc_info=True)
+        return jsonify({"error": str(e), "date": date}), 500
 
 
 # ─── Cron job routes (Vercel Cron) ───────────────────────────────
