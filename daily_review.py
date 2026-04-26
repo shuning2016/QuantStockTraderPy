@@ -90,8 +90,11 @@ def _parse_rr_from_reason(reason: str) -> Optional[float]:
 
 
 def _count_score_lines(ai_text: str) -> int:
-    """Count ▸ SYM lines in the AI SCORE output section."""
-    return len(re.findall(r'^\s*[▸►▷>]\s*[A-Z]{1,6}', ai_text, re.MULTILINE))
+    """Count scored stock lines in the AI SCORE output section.
+    BUG-3 fix: pattern now handles class-share tickers like BRK.B and BF.A.
+    Matches: ▸ AAPL, ▸ BRK.B, > NVDA, etc.
+    """
+    return len(re.findall(r'^\s*[▸►▷>]\s*[A-Z][A-Z0-9.]{0,5}\b', ai_text, re.MULTILINE))
 
 
 # ─── Individual Checks ───────────────────────────────────────────
@@ -99,34 +102,43 @@ def _count_score_lines(ai_text: str) -> int:
 def _chk1_session_completeness(session_logs: list, date: str) -> dict:
     """
     CHK-1: Did all 4 sessions fire today for each provider?
-    Source: session log entries (one entry per session × provider run).
+    BUG-4 fix: also flags sessions that fired but returned an AI [ERROR] response
+    so a silent API failure doesn't pass as ✅ just because the log entry exists.
     """
-    fired: dict = {p: set() for p in _ALL_PROVIDERS}
+    fired:     dict = {p: set()  for p in _ALL_PROVIDERS}
+    ai_errors: dict = {p: []     for p in _ALL_PROVIDERS}
+
     for entry in session_logs:
         prov = entry.get("ai_provider", "")
         sess = entry.get("session", "")
         if prov in fired and sess in _ALL_SESSIONS:
             fired[prov].add(sess)
+            # A session that fired but the AI call failed has ai_analysis starting with [ERROR]
+            ai_text = entry.get("ai_analysis", "")
+            if ai_text.startswith("[ERROR]"):
+                ai_errors[prov].append(sess)
 
     issues = []
     evidence = {}
     for prov in _ALL_PROVIDERS:
         missing = [s for s in _ALL_SESSIONS if s not in fired[prov]]
         found   = sorted(fired[prov])
-        evidence[prov] = {"fired": found, "missing": missing}
+        errors  = ai_errors[prov]
+        evidence[prov] = {"fired": found, "missing": missing, "ai_errors": errors}
         if missing:
-            issues.append(f"{prov}: missing {missing}")
+            issues.append(f"{prov}: missing sessions {missing}")
+        if errors:
+            issues.append(f"{prov}: AI call failed in session(s) {errors}")
 
     if not issues:
         status  = _OK
-        summary = f"All 4 sessions fired for all providers"
-    elif len(issues) == len(_ALL_PROVIDERS) and all(
-        len(fired[p]) == 0 for p in _ALL_PROVIDERS
-    ):
+        summary = "All 4 sessions fired with no AI errors for all providers"
+    elif all(len(fired[p]) == 0 for p in _ALL_PROVIDERS):
         status  = _FAIL
         summary = f"No sessions fired at all on {date} — cron may be down"
     else:
-        status  = _WARN
+        has_ai_errors = any(ai_errors[p] for p in _ALL_PROVIDERS)
+        status  = _FAIL if has_ai_errors else _WARN
         summary = "; ".join(issues)
 
     return {"id": "CHK-1", "name": "Session Completeness",
@@ -173,7 +185,9 @@ def _chk2_watchlist_coverage(session_logs: list, expected_stocks: int) -> dict:
 def _chk3_decision_parse_quality(session_logs: list) -> dict:
     """
     CHK-3: Were DECISION blocks parsed as structured (pipe-delimited)?
-    Prose fallback and synthetic_hold are warning signals.
+    BUG-5 fix: now reads from decisions_raw (added to session log by app.py fix)
+    which contains parse_mode for ALL decisions — both executed and blocked.
+    Falls back to exec_log for older log entries that predate this fix.
     """
     counts: dict = {}   # "prov/sess" → {structured, prose_fallback, synthetic_hold, total}
     issues  = []
@@ -186,7 +200,10 @@ def _chk3_decision_parse_quality(session_logs: list) -> dict:
         key  = f"{prov}/{sess}"
         counts.setdefault(key, {"structured": 0, "prose_fallback": 0,
                                 "synthetic_hold": 0, "total": 0})
-        for item in entry.get("exec_log", []):
+        # Prefer decisions_raw (has parse_mode for every decision including executed ones).
+        # Fall back to exec_log for log entries written before this fix was deployed.
+        items = entry.get("decisions_raw") or entry.get("exec_log", [])
+        for item in items:
             pm = item.get("parse_mode", "")
             if pm == "structured":
                 counts[key]["structured"] += 1
@@ -196,7 +213,8 @@ def _chk3_decision_parse_quality(session_logs: list) -> dict:
             elif pm == "synthetic_hold":
                 counts[key]["synthetic_hold"] += 1
                 issues.append(f"{key}: synthetic_hold (no DECISION block found)")
-            counts[key]["total"] += 1
+            if pm:
+                counts[key]["total"] += 1
 
     unique_issues = list(dict.fromkeys(issues))   # deduplicate, preserve order
     status  = (_FAIL if any("prose_fallback" in i for i in unique_issues)
@@ -391,26 +409,65 @@ def _chk8_same_day_reentry(trade_logs: list) -> dict:
             "status": status, "summary": summary, "evidence": violations}
 
 
-def _chk9_premarket_handoff(states: dict) -> dict:
+def _chk9_premarket_handoff(session_logs: list, states: dict) -> dict:
     """
-    CHK-9: Was premarket_focus set in state after premarket ran?
-    An empty string means the premarket AI either didn't produce a NEXT_ACTION
-    line or the extraction regex failed — the opening session then ran blind.
+    CHK-9: Did the premarket session run and extract a NEXT_ACTION focus note?
+
+    BUG-2 fix: primary source is now session_logs (historical-date safe).
+    The old implementation read live state["premarket_focus"] which always
+    reflected TODAY's run regardless of the date being checked.
+    Logic:
+      1. Find premarket log entry per provider → confirms session ran.
+      2. Check ai_analysis for a NEXT_ACTION line → confirms extraction worked.
+      3. Live state["premarket_focus"] is included as supplementary evidence only.
+    Note: ai_analysis is stored truncated to 2000 chars; NEXT_ACTION lines that
+    appear beyond that point will be missed — this is a pre-existing log limit.
     """
     results  = {}
     warnings = []
-    for prov, state in states.items():
-        focus = state.get("premarket_focus", None)
-        results[prov] = {"premarket_focus": focus}
-        if focus is None:
-            warnings.append(f"{prov}: premarket_focus key missing (premarket may not have run)")
-        elif focus.strip() == "":
-            warnings.append(f"{prov}: premarket_focus is empty (NEXT_ACTION not extracted)")
+
+    # Index premarket entries by provider from session_logs
+    premarket_entries: dict = {}
+    for entry in session_logs:
+        if entry.get("session") == "premarket":
+            prov = entry.get("ai_provider", "")
+            if prov and prov not in premarket_entries:
+                premarket_entries[prov] = entry
+
+    for prov in _ALL_PROVIDERS:
+        entry = premarket_entries.get(prov)
+        live_focus = states.get(prov, {}).get("premarket_focus")
+
+        if entry is None:
+            results[prov] = {"premarket_ran": False, "next_action_found": None,
+                             "premarket_focus": None}
+            warnings.append(f"{prov}: no premarket session log found (session did not run)")
+            continue
+
+        ai_text = entry.get("ai_analysis", "")
+        if ai_text.startswith("[ERROR]"):
+            results[prov] = {"premarket_ran": True, "next_action_found": False,
+                             "ai_error": True, "premarket_focus": None}
+            warnings.append(f"{prov}: premarket ran but AI returned error — no focus note")
+            continue
+
+        na_match   = re.search(r'NEXT_ACTION\s*[：:]\s*(.+)', ai_text)
+        focus_from_log = na_match.group(1).strip()[:80] if na_match else None
+
+        results[prov] = {
+            "premarket_ran":     True,
+            "next_action_found": focus_from_log is not None,
+            "premarket_focus":   focus_from_log or live_focus,
+        }
+        if focus_from_log is None:
+            warnings.append(
+                f"{prov}: premarket ran but no NEXT_ACTION line found "
+                f"(opening session had no continuity note)"
+            )
 
     status  = _WARN if warnings else _OK
     summary = ("; ".join(warnings) if warnings
-               else "Premarket focus note populated for all providers: "
-                    + " | ".join(f"{p}: '{v['premarket_focus'][:40]}…'" for p, v in results.items()))
+               else "Premarket ran and NEXT_ACTION extracted for all providers")
 
     return {"id": "CHK-9", "name": "Premarket→Opening Handoff",
             "status": status, "summary": summary, "evidence": results}
@@ -509,21 +566,24 @@ def run_daily_review(
     read_log_fn: Callable,
     load_state_fn: Callable,
     watchlist: list,
+    max_watchlist_stocks: int = 6,
 ) -> dict:
     """
     Run all 10 execution health checks for a given trading date.
 
     Args:
-        date          : "YYYY-MM-DD" — the trading day to inspect
-        read_log_fn   : read_log_range(prefix, from, to, provider=None) → list
-                        (same signature as the one in app.py)
-        load_state_fn : load_trade_state(provider) → dict
-        watchlist     : current watchlist list (to know expected stock count)
+        date                 : "YYYY-MM-DD" — the trading day to inspect
+        read_log_fn          : read_log_range(prefix, from, to, provider=None) → list
+        load_state_fn        : load_trade_state(provider) → dict
+        watchlist            : current watchlist list (to know expected stock count)
+        max_watchlist_stocks : CFG.MAX_WATCHLIST_STOCKS — cap for CHK-2 expected count.
+                               BUG-1 fix: passed in rather than imported inside the
+                               function body, removing the runtime strategy_v6 dependency.
 
     Returns a dict with:
         "date"        : date checked
         "checks"      : list of 10 check result dicts
-        "ok" / "warn" / "fail" counts
+        "ok_count" / "warn_count" / "fail_count"
         "pnl_summary" : per-provider factual P&L totals (no conclusions)
         "report_text" : human-readable plain-text report
         "generated_at": UTC timestamp
@@ -536,7 +596,9 @@ def run_daily_review(
     logger.info("Loaded %d session entries and %d trade entries for %s",
                 len(session_logs), len(trade_logs), date)
 
-    # Load live state for every provider (read-only — never modified here)
+    # Load live state for every provider (read-only — never modified here).
+    # Note: live state is used only for CHK-5/CHK-6 (open positions) and as
+    # supplementary evidence for CHK-9. CHK-9 now uses session_logs as primary.
     states: dict = {}
     for prov in _ALL_PROVIDERS:
         try:
@@ -545,10 +607,9 @@ def run_daily_review(
             logger.warning("Could not load state for %s: %s", prov, e)
             states[prov] = {}
 
-    # Expected number of stocks (capped by MAX_WATCHLIST_STOCKS)
-    from strategy_v6 import CFG  # import here to avoid circular at module level
-    stock_count = len([s for s in watchlist if s.get("type") == "stock"])
-    expected_stocks = min(stock_count, CFG.MAX_WATCHLIST_STOCKS)
+    # Expected number of stocks capped by the watchlist limit
+    stock_count     = len([s for s in watchlist if s.get("type") == "stock"])
+    expected_stocks = min(stock_count, max_watchlist_stocks)
 
     # ── Run all 10 checks ────────────────────────────────────────
     checks = [
@@ -560,7 +621,7 @@ def run_daily_review(
         _chk6_stop_above_entry(states),
         _chk7_rr_gate_enforcement(trade_logs),
         _chk8_same_day_reentry(trade_logs),
-        _chk9_premarket_handoff(states),
+        _chk9_premarket_handoff(session_logs, states),   # BUG-2: now takes session_logs
         _chk10_prose_sell_entries(trade_logs),
     ]
 

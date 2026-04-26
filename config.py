@@ -65,6 +65,17 @@ MODELS = {
 MAX_TOKENS = 4000   # max tokens for every AI call (STRATEGY-3: raised from 2000 to avoid
                     # response truncation mid-DECISION when analysing 6-stock watchlist)
 
+# TOKEN-1: session-specific output token caps.
+# premarket is analysis-only (no DECISION blocks) so 1500 tokens is enough.
+# closing needs SELLs only — fewer decisions than a full opening session.
+# opening/mid need full SCORE + DECISION for all watchlist stocks → keep at 4000.
+SESSION_MAX_TOKENS: dict = {
+    "premarket": 1500,
+    "opening":   4000,
+    "mid":       4000,
+    "closing":   2000,
+}
+
 # ── Data feed URLs ────────────────────────────────────────────────
 FINNHUB_QUOTE_URL   = "https://finnhub.io/api/v1/quote"
 FINNHUB_NEWS_URL    = "https://finnhub.io/api/v1/company-news"

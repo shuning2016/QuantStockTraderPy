@@ -22,7 +22,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 # ─── Config (API keys, model names, cache TTLs) ─────────────────
 from config import (
     FINNHUB_KEY, NEWSAPI_KEY, CLAUDE_KEY, GROK_KEY, DEEPSEEK_KEY,
-    SERPAPI_KEY, PORT, MODELS, MAX_TOKENS,
+    SERPAPI_KEY, PORT, MODELS, MAX_TOKENS, SESSION_MAX_TOKENS,
     FINNHUB_QUOTE_URL, FINNHUB_NEWS_URL, COINGECKO_COIN_URL, NEWSAPI_URL,
     PRICE_CACHE_TTL, CRYPTO_CACHE_TTL, NEWS_CACHE_TTL,
     check_config,
@@ -567,72 +567,167 @@ def _parse_ts(s):
         return int(time.time() * 1000)
 
 # ─── AI providers ─────────────────────────────────────────────────
-def call_claude(prompt: str) -> str:
+
+def _api_post_with_retry(
+    url: str,
+    headers: dict,
+    payload: dict,
+    timeout: int,
+    provider_name: str,
+    max_retries: int = 3,
+) -> requests.Response:
+    """POST with exponential backoff on transient errors (5xx, 429, connection issues).
+    TOKEN-4: prevents a single network hiccup from silently killing a session.
+    """
+    _ai_log = _logging.getLogger("quant.ai")
+    delay = 2
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                _ai_log.warning(
+                    "%s HTTP %s on attempt %d/%d — retrying in %ds",
+                    provider_name, r.status_code, attempt, max_retries, delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+                continue
+            return r
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                _ai_log.warning(
+                    "%s connection error attempt %d/%d: %s — retrying in %ds",
+                    provider_name, attempt, max_retries, exc, delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+    if last_exc:
+        raise last_exc
+    return r  # unreachable but satisfies type checkers
+
+
+def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
     if not CLAUDE_KEY:
         return "[ERROR] CLAUDE_KEY not set"
+    _ai_log = _logging.getLogger("quant.ai")
     try:
-        r = requests.post(
+        # TOKEN-2: enable prompt caching via content-block format + beta header.
+        # Marks the full prompt as cacheable (ephemeral = 5 min TTL).
+        # Cache hits are logged via usage.cache_read_input_tokens below.
+        r = _api_post_with_retry(
             MODELS["claude"]["api_url"],
-            headers={"x-api-key": CLAUDE_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": MODELS["claude"]["model"], "max_tokens": MAX_TOKENS,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60,
+            headers={
+                "x-api-key":        CLAUDE_KEY,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta":   "prompt-caching-2024-07-31",
+                "content-type":     "application/json",
+            },
+            payload={
+                "model":      MODELS["claude"]["model"],
+                "max_tokens": max_tokens,
+                "messages":   [{"role": "user", "content": [
+                    {"type": "text", "text": prompt,
+                     "cache_control": {"type": "ephemeral"}},
+                ]}],
+            },
+            timeout=90,
+            provider_name="Claude",
         )
         data = r.json()
         if not r.ok or not data.get("content"):
             err = data.get("error", {})
             msg = err.get("message", str(data)) if isinstance(err, dict) else str(data)
-            _logging.getLogger("quant.ai").error("Claude API error: %s", data)
+            _ai_log.error("Claude API error: %s", data)
             return f"[ERROR] Claude API: {msg}"
-        return data["content"][0]["text"]
+        # TOKEN-3: log token usage for cost visibility and cache hit tracking
+        usage = data.get("usage", {})
+        if usage:
+            _ai_log.info(
+                "Claude tokens: in=%d out=%d cache_created=%d cache_read=%d",
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+                usage.get("cache_creation_input_tokens", 0),
+                usage.get("cache_read_input_tokens", 0),
+            )
+        content = data.get("content", [])
+        return content[0].get("text", "") if content and isinstance(content[0], dict) else ""
     except Exception as e:
         return f"[ERROR] Claude: {e}"
 
-def call_grok(prompt: str) -> str:
+def call_grok(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
     if not GROK_KEY:
         return "[ERROR] GROK_KEY not set"
+    _ai_log = _logging.getLogger("quant.ai")
     try:
-        r = requests.post(
+        r = _api_post_with_retry(
             MODELS["grok"]["api_url"],
             headers={"Authorization": f"Bearer {GROK_KEY}",
                      "Content-Type": "application/json"},
-            json={"model": MODELS["grok"]["model"], "max_tokens": MAX_TOKENS,
-                  "messages": [{"role": "user", "content": prompt}]},
+            payload={"model": MODELS["grok"]["model"], "max_tokens": max_tokens,
+                     "messages": [{"role": "user", "content": prompt}]},
             timeout=60,
+            provider_name="Grok",
         )
         data = r.json()
         if not r.ok or not data.get("choices"):
-            _logging.getLogger("quant.ai").error("Grok API error: %s", data)
-            return f"[ERROR] Grok API: {data.get('error', {}).get('message', str(data))}"
+            # TOKEN-6: safe error extraction — error may be a string or a dict
+            err = data.get("error", {})
+            msg = err.get("message", str(data)) if isinstance(err, dict) else str(data)
+            _ai_log.error("Grok API error: %s", data)
+            return f"[ERROR] Grok API: {msg}"
+        # TOKEN-3: log token usage
+        usage = data.get("usage", {})
+        if usage:
+            _ai_log.info(
+                "Grok tokens: prompt=%d completion=%d total=%d",
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                usage.get("total_tokens", 0),
+            )
         return data["choices"][0]["message"]["content"]
     except Exception as e:
         return f"[ERROR] Grok: {e}"
 
-def call_deepseek(prompt: str) -> str:
+def call_deepseek(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
     if not DEEPSEEK_KEY:
         return "[ERROR] DEEPSEEK_KEY not set"
+    _ai_log = _logging.getLogger("quant.ai")
     try:
-        r = requests.post(
+        r = _api_post_with_retry(
             MODELS["deepseek"]["api_url"],
             headers={"Authorization": f"Bearer {DEEPSEEK_KEY}",
                      "Content-Type": "application/json"},
-            json={"model": MODELS["deepseek"]["model"], "max_tokens": MAX_TOKENS,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60,
+            payload={"model": MODELS["deepseek"]["model"], "max_tokens": max_tokens,
+                     "messages": [{"role": "user", "content": prompt}]},
+            timeout=75,
+            provider_name="DeepSeek",
         )
         data = r.json()
         if not r.ok or not data.get("choices"):
-            _logging.getLogger("quant.ai").error("DeepSeek API error: %s", data)
-            return f"[ERROR] DeepSeek API: {data.get('error', {}).get('message', str(data))}"
+            # TOKEN-6: safe error extraction — error may be a string or a dict
+            err = data.get("error", {})
+            msg = err.get("message", str(data)) if isinstance(err, dict) else str(data)
+            _ai_log.error("DeepSeek API error: %s", data)
+            return f"[ERROR] DeepSeek API: {msg}"
+        # TOKEN-3: log token usage
+        usage = data.get("usage", {})
+        if usage:
+            _ai_log.info(
+                "DeepSeek tokens: prompt=%d completion=%d total=%d",
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                usage.get("total_tokens", 0),
+            )
         return data["choices"][0]["message"]["content"]
     except Exception as e:
         return f"[ERROR] DeepSeek: {e}"
 
-def call_ai(prompt: str, provider: str = "grok") -> str:
-    if provider == "claude":   return call_claude(prompt)
-    if provider == "deepseek": return call_deepseek(prompt)
-    return call_grok(prompt)
+def call_ai(prompt: str, provider: str = "grok", max_tokens: int = MAX_TOKENS) -> str:
+    if provider == "claude":   return call_claude(prompt, max_tokens)
+    if provider == "deepseek": return call_deepseek(prompt, max_tokens)
+    return call_grok(prompt, max_tokens)
 
 # ─── Trade session runner ─────────────────────────────────────────
 def run_trade_session(session: str, provider: str) -> dict:
@@ -757,8 +852,10 @@ def run_trade_session(session: str, provider: str) -> dict:
     prompt = build_prompt_v6(session, portfolio_txt, watchlist_txt,
                               news_txt, log_summary, focus_note)
 
-    # Call AI
-    ai_text = call_ai(prompt, provider)
+    # TOKEN-1: use session-specific output token cap to avoid over-spending on
+    # sessions that need fewer tokens (premarket = analysis only, closing = SELLs).
+    max_tokens = SESSION_MAX_TOKENS.get(session, MAX_TOKENS)
+    ai_text = call_ai(prompt, provider, max_tokens)
 
     # Parse regime from AI response and update state
     regime_str, spy_adx, spy_above = parse_regime_from_text(ai_text)
@@ -917,6 +1014,14 @@ def run_trade_session(session: str, provider: str) -> dict:
         "ai_analysis": ai_text[:2000],
         "executed":    executed,
         "exec_log":    exec_log,
+        # BUG-5 fix: store raw decision parse modes so CHK-3 can read them for
+        # ALL decisions (not just unexecuted ones which are the only ones that
+        # had parse_mode in exec_log previously).
+        "decisions_raw": [
+            {"action": d.get("action"), "symbol": d.get("symbol"),
+             "parse_mode": d.get("parse_mode", "structured")}
+            for d in decisions
+        ],
         "regime":      state.get("currentRegime", "Unknown"),
         "decisions_parsed": len(decisions),
         "decisions_executed": sum(1 for e in exec_log if e["status"] == "executed"),
@@ -993,10 +1098,11 @@ def api_daily_review(date: str = None):
 
     try:
         result = run_daily_review(
-            date         = date,
-            read_log_fn  = read_log_range,
-            load_state_fn= load_trade_state,
-            watchlist    = load_watchlist(),
+            date                 = date,
+            read_log_fn          = read_log_range,
+            load_state_fn        = load_trade_state,
+            watchlist            = load_watchlist(),
+            max_watchlist_stocks = CFG.MAX_WATCHLIST_STOCKS,
         )
 
         # Optional plain-text mode for easy terminal reading
