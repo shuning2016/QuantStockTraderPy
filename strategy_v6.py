@@ -9,8 +9,14 @@ A01_philosophy → A10_system_control
 """
 
 import math, re, time, logging as _logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo("America/New_York")
+except ImportError:
+    # Python < 3.9: use fixed UTC-4 offset (EDT; close enough for date-boundary use)
+    _ET = timezone(timedelta(hours=-4))
 
 
 # ─── Constants ────────────────────────────────────────────────────
@@ -287,7 +293,10 @@ def get_quant_metrics(state: dict) -> dict:
         curve.append({"date": d, "totalValue": cum})
     # Replace (or add) today's data point with the real mark-to-market NAV so
     # the equity curve reflects unrealized gains, not just closed daily PnL.
-    today = datetime.now().strftime("%Y-%m-%d")
+    # BUG-8 fix: use Eastern Time so this date matches state["_today"] (also ET).
+    # datetime.now() used UTC on Vercel; after 20:00 ET the UTC date is already
+    # tomorrow, producing a phantom duplicate equity-curve entry.
+    today = datetime.now(_ET).strftime("%Y-%m-%d")
     current_nav = round(calc_nav(state), 2)
     if curve and curve[-1]["date"] == today:
         curve[-1]["totalValue"] = current_nav
@@ -320,9 +329,15 @@ def check_feedback_trigger(state: dict) -> Optional[dict]:
                / abs(baseline["expectancy"])) if baseline["expectancy"] > 0 else 0
     wr_drop = (baseline["winRate"] - metrics["winRate"]) / 100
     if ev_drop >= CFG.FEEDBACK_EV_DROP:
+        # BUG-6 fix: reset the baseline after an alert fires so the next comparison
+        # starts fresh.  Without this the alert fires on every subsequent session
+        # forever (metrics stay below a frozen baseline), flooding logs with false
+        # positives and drowning out real degradation signals.
+        state["feedbackBaseline"] = metrics
         return {"needReview": True,
                 "reason": f"期望值下降{ev_drop*100:.0f}%（{baseline['expectancy']}→{metrics['expectancy']}）"}
     if wr_drop >= CFG.FEEDBACK_WR_DROP:
+        state["feedbackBaseline"] = metrics
         return {"needReview": True,
                 "reason": f"胜率下降{wr_drop*100:.0f}%（{baseline['winRate']}%→{metrics['winRate']}%）"}
     return None
@@ -440,8 +455,11 @@ def parse_ai_decisions(ai_text):
         normalised = _re.sub(r"^(?:买入|建仓|开仓|做多|入场)", "BUY",  normalised)
         normalised = _re.sub(r"^(?:卖出|平仓|清仓|减仓|做空)", "SELL", normalised)
         normalised = _re.sub(r"^(?:持有|持仓|不操作|观望|不变)", "HOLD", normalised)
+        # BUG-9 fix: require at least 1 char in symbol group ({1,12} not {0,12}).
+        # {0,12} matched empty symbols ("BUY||10|reason") producing decisions with
+        # symbol="" that polluted exec_log and triggered spurious confidence reads.
         m = _re.match(
-            r"(BUY|SELL|HOLD)\|([A-Z0-9.]{0,12})\|(\d*)\|?(.*)",
+            r"(BUY|SELL|HOLD)\|([A-Z0-9.]{1,12})\|(\d*)\|?(.*)",
             normalised, _re.IGNORECASE
         )
         if m:
@@ -927,7 +945,13 @@ def execute_decisions(decisions: list, state: dict, session: str,
             # D4: cap position size when ATR stop exceeds confidence-tier limit
             max_stp = CFG.CONF_MAX_STOP_PCT.get(min(conf, 9))
             d4_note = ""
-            if max_stp is not None:
+            # BUG-4 fix: guard max_stp > 0 before dividing.  Keys 0–5 map to 0.0
+            # (intended as a second defence for below-gate trades); dividing by
+            # capped_risk=0 would raise ZeroDivisionError and crash the entire
+            # execute_decisions call, losing all remaining decisions for the session.
+            # The confidence gate at line above already blocks conf<min_conf trades
+            # before they reach here; this guard is a safe no-op for normal flow.
+            if max_stp is not None and max_stp > 0:
                 actual_stop_pct = sizing["risk_per_share"] / price * 100 if price else 0
                 if actual_stop_pct > max_stp:
                     capped_risk = price * max_stp / 100
@@ -1005,12 +1029,15 @@ def execute_decisions(decisions: list, state: dict, session: str,
                 h["shares"] -= sell_sh
             # S2/D3: start cooldown clock
             state.setdefault("cooldowns", {})[sym] = today
-            # C5: register for post-exit outcome check next session
-            state.setdefault("post_exit_watch", {})[sym] = {
+            # C5: register for post-exit outcome check next session.
+            # BUG-5 fix: use setdefault on the symbol key so a partial auto-stop
+            # exit followed by an AI full-exit on the same day doesn't overwrite
+            # the first exit's log_id — the first exit's outcome record is preserved.
+            state.setdefault("post_exit_watch", {}).setdefault(sym, {
                 "exit_price": price, "exit_date": today, "avg_cost": avg_cost,
                 "pnl_pct": round((price - avg_cost) / avg_cost * 100, 2) if avg_cost else 0,
                 "log_id": log[-1]["id"] if log else None,
-            }
+            })
             sign  = "盈" if real >= 0 else "亏"
             extra = " ⚠️[prose解析,不计入A07]" if parse_err else ""
             executed.append(f"✅ 卖出 {sym} {sell_sh}股 @${price:.2f} {sign}${abs(real):.2f}{extra}")

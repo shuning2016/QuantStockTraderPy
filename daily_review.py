@@ -369,38 +369,47 @@ def _chk7_rr_gate_enforcement(trade_logs: list) -> dict:
 
 def _chk8_same_day_reentry(trade_logs: list) -> dict:
     """
-    CHK-8: Same symbol bought twice in one day by the same provider?
-    The 48h cooldown should prevent same-day re-entry after any exit.
-    Two BUYs on the same symbol without an intervening SELL is also flagged
-    (averaging down is blocked by check_position_rules).
+    CHK-8: Did a provider re-enter a symbol on the same day after exiting it?
+    The 48h cooldown should block a BUY that follows a same-day SELL.
+
+    BUG-7 fix: the old check flagged ANY 2+ BUYs for the same symbol, including
+    legitimate scale-ins (adding to a winning position at a higher price, which
+    check_position_rules allows).  Only a BUY that follows an intervening SELL
+    in the day's timeline is a cooldown violation — that's the re-entry pattern.
     """
-    # Build timeline per provider: track buy/sell events for each symbol
-    timeline: dict = {}   # (prov, sym) → list of {action, session, price}
+    # Build timeline per (provider, symbol), sorted chronologically
+    timeline: dict = {}
     for t in sorted(trade_logs, key=lambda x: x.get("timestamp", "")):
         prov = t.get("ai_provider", "")
         sym  = t.get("symbol", "")
         act  = t.get("action", "")
         if not sym or act not in ("BUY", "SELL"):
             continue
-        key = (prov, sym)
-        timeline.setdefault(key, []).append({
+        timeline.setdefault((prov, sym), []).append({
             "action": act, "session": t.get("session"), "price": t.get("price")
         })
 
     violations = []
     for (prov, sym), events in timeline.items():
-        buys = [e for e in events if e["action"] == "BUY"]
-        if len(buys) >= 2:
+        # Walk the sequence: a BUY that comes AFTER a SELL is a re-entry violation
+        had_sell      = False
+        reentry_buys  = 0
+        for e in events:
+            if e["action"] == "SELL":
+                had_sell = True
+            elif e["action"] == "BUY" and had_sell:
+                reentry_buys += 1
+        if reentry_buys >= 1:
             violations.append({
                 "provider": prov,
                 "symbol":   sym,
                 "events":   events,
-                "note":     "same symbol bought 2+ times today by same provider",
+                "note":     f"BUY after same-day SELL ({reentry_buys} re-entry buy(s))",
             })
 
     status  = _FAIL if violations else _OK
     summary = ("; ".join(
-                   f"{v['provider']}/{v['symbol']}: {len([e for e in v['events'] if e['action']=='BUY'])} BUYs"
+                   f"{v['provider']}/{v['symbol']}: re-entered after same-day exit"
                    for v in violations
                ) if violations
                else "No same-day re-entries detected")

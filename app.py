@@ -258,6 +258,13 @@ def load_trade_state(provider: str) -> dict:
                                            today or "2099-12-31",
                                            provider)
                 if trade_log:
+                    # BUG-2 fix: mark every rebuilt entry as already logged so the
+                    # double-write guard in run_trade_session skips them.  Without
+                    # this flag the JSONL anti-duplicate check never fires on cold-
+                    # start-rebuilt entries, causing every past trade to be appended
+                    # again on the next session → inflated P&L and win-rate metrics.
+                    for e in trade_log:
+                        e["_logged"] = True
                     state["log"] = list(reversed(trade_log))  # oldest first
             return state
         except (json.JSONDecodeError, ValueError) as e:
@@ -382,14 +389,22 @@ def get_stock_quote(sym: str) -> dict:
         if r.status_code != 200:
             _logging.getLogger("quant.data").warning("Finnhub quote %s: HTTP %s", sym, r.status_code)
             return None
-        q   = r.json()
-        dp  = q.get("c", 0) or q.get("pc", 0)
+        q        = r.json()
+        c_price  = q.get("c", 0) or 0
+        pc_price = q.get("pc", 0) or 0
+        dp       = c_price if c_price else pc_price
+        # BUG-1 fix: log a warning when using prev-close as fallback so that
+        # stale-price stop evaluations are visible in Vercel function logs.
+        if not c_price and pc_price:
+            _logging.getLogger("quant.data").warning(
+                "%s: Finnhub c=0 (market closed or API glitch) — "
+                "using prev_close=%.2f; stop checks may be stale", sym, pc_price)
         res = {"c": dp, "d": q.get("d"), "dp": q.get("dp"),
                "h": q.get("h"), "l": q.get("l"), "o": q.get("o"), "pc": q.get("pc"),
                # STRATEGY-1: include current-day volume so watchlist text can show
                # Vol for the AI's ② volume condition check (was missing before)
                "v": q.get("v", 0),
-               "isRealtime": bool(q.get("c", 0)), "type": "stock", "_ts": time.time()}
+               "isRealtime": bool(c_price), "type": "stock", "_ts": time.time()}
         _price_cache[sym] = res
         return res
     except Exception:
