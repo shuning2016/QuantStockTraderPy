@@ -273,6 +273,31 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .sector-score-bar{width:40px;height:6px;background:var(--bdr);border-radius:3px;overflow:hidden;flex-shrink:0}
 .sector-score-fill{height:100%;border-radius:3px}
 .suggest-tech-badge{padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;background:var(--purple-l);color:var(--purple);white-space:nowrap;flex-shrink:0}
+
+/* ── Daily Review tab ── */
+.dr-run-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.dr-summary-bar{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
+.dr-sum-cell{border-radius:10px;padding:14px;text-align:center}
+.dr-sum-cell.ok{background:var(--green-l);border:1.5px solid #a5d6a7}
+.dr-sum-cell.warn{background:var(--amber-l);border:1.5px solid #f9c84a}
+.dr-sum-cell.fail{background:var(--red-l);border:1.5px solid #ef9a9a}
+.dr-sum-count{font-size:28px;font-weight:700;line-height:1}
+.dr-sum-cell.ok .dr-sum-count{color:var(--green)}
+.dr-sum-cell.warn .dr-sum-count{color:var(--amber)}
+.dr-sum-cell.fail .dr-sum-count{color:var(--red)}
+.dr-sum-label{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin-top:5px}
+.dr-check-list{display:flex;flex-direction:column;gap:7px;margin-bottom:4px}
+.dr-check{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;border-radius:9px;border:1.5px solid var(--bdr);background:var(--card)}
+.dr-check.ok{border-color:#a5d6a7;background:var(--green-l)}
+.dr-check.warn{border-color:#f9c84a;background:var(--amber-l)}
+.dr-check.fail{border-color:#ef9a9a;background:var(--red-l)}
+.dr-check-badge{font-size:15px;flex-shrink:0;margin-top:1px}
+.dr-check-id{font-size:10px;font-weight:700;color:var(--t3);min-width:46px;flex-shrink:0;margin-top:3px}
+.dr-check-body{flex:1;min-width:0}
+.dr-check-name{font-size:13px;font-weight:600;color:var(--t);margin-bottom:2px}
+.dr-check-summary{font-size:12px;color:var(--t2);line-height:1.5}
+.dr-pnl-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--bdr);font-size:13px}
+.dr-pnl-row:last-child{border-bottom:none;font-weight:700}
 </style>
 </head>
 <body>
@@ -327,6 +352,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="tab active" id="tab-news"     onclick="switchTab('news')">行情 &amp; 新闻</div>
       <div class="tab"        id="tab-trade"    onclick="switchTab('trade')">模拟交易</div>
       <div class="tab"        id="tab-messages" onclick="switchTab('messages')">交易记录</div>
+      <div class="tab"        id="tab-daily"    onclick="switchTab('daily')">📋 日检</div>
       <div class="tab"        id="tab-weekly"   onclick="switchTab('weekly')">周报 &amp; 建议</div>
     </div>
 
@@ -366,6 +392,21 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
           <span class="wr-meta-txt" id="suggest-meta">周六 12:00 ET 自动运行 · 扫描板块新闻推荐下周观察名单</span>
         </div>
         <div id="suggest-content"><div class="empty-panel">点击「立即生成选股建议」或等待周六自动运行</div></div>
+      </div>
+    </div>
+
+    <!-- Daily Review panel -->
+    <div id="panel-daily" style="display:none">
+      <div class="dr-run-bar">
+        <input type="date" id="dr-date"
+               style="padding:5px 9px;border:1px solid var(--bdr);border-radius:6px;font-size:13px;background:var(--card);color:var(--t);outline:none">
+        <button class="btn btn-sm btn-p" onclick="runDailyReview()" id="btn-dr-run">🔍 运行日检</button>
+        <span id="dr-meta" style="font-size:12px;color:var(--t3)">
+          检查今日 10 项执行健康指标 · 不影响策略，仅检测代码/系统执行问题
+        </span>
+      </div>
+      <div id="dr-content">
+        <div class="empty-panel">选择日期后点击「运行日检」</div>
       </div>
     </div>
 
@@ -640,7 +681,7 @@ async function analyzeItem(sym,type){
 // ═══════════════════════════════════════════════════════════════
 let _currentLogTab='sessions', _tradeTimer=null;
 function switchTab(n){
-  ['news','trade','messages','weekly'].forEach(t=>{
+  ['news','trade','messages','daily','weekly'].forEach(t=>{
     document.getElementById('panel-'+t).style.display=t===n?'':'none';
     document.getElementById('tab-'+t).className='tab'+(t===n?' active':'');
   });
@@ -657,6 +698,7 @@ function switchTab(n){
     checkKvStatus();
   }
   if(n==='weekly') initWeeklyPanel();
+  if(n==='daily')  initDailyPanel();
 }
 
 async function checkKvStatus(){
@@ -1487,6 +1529,135 @@ function renderSuggestions(data) {
       </div>
       <div class="wr-ai-analysis">${_renderMarkdown(aiText)}</div>
     </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  DAILY REVIEW TAB
+// ═══════════════════════════════════════════════════════════════
+async function initDailyPanel(){
+  const dateEl = document.getElementById('dr-date');
+  if(!dateEl.value) dateEl.value = getNYDate();
+  await runDailyReview();
+}
+
+async function runDailyReview(){
+  const dateEl = document.getElementById('dr-date');
+  const btn    = document.getElementById('btn-dr-run');
+  const el     = document.getElementById('dr-content');
+  const date   = dateEl.value || getNYDate();
+  btn.disabled = true;
+  btn.textContent = '⏳ 检查中…';
+  el.innerHTML = '<div class="lcenter"><span class="sp dk"></span><span style="margin-left:10px;font-size:13px;color:var(--t2)">正在运行 10 项执行健康检查…</span></div>';
+  try{
+    const res  = await fetch(`/api/daily-review/${date}`);
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    renderDailyReview(data);
+  }catch(e){
+    el.innerHTML = `<div class="empty-panel" style="color:var(--red)">检查失败: ${esc(e.message)}</div>`;
+  }finally{
+    btn.disabled = false;
+    btn.textContent = '🔍 运行日检';
+  }
+}
+
+function renderDailyReview(data){
+  const el = document.getElementById('dr-content');
+  const checks  = data.checks  || [];
+  const pnl     = data.pnl_summary || {};
+  const date    = data.date    || '';
+  const runtime = data.runtime_ms != null ? `${data.runtime_ms} ms` : '';
+
+  const STATUS_CLS   = { ok:'ok', warn:'warn', fail:'fail', skip:'warn' };
+  const STATUS_BADGE = { ok:'✅', warn:'⚠️', fail:'❌', skip:'➖' };
+
+  // Count summary
+  const counts = { ok:0, warn:0, fail:0 };
+  checks.forEach(c => {
+    const s = (c.status||'skip').toLowerCase();
+    if(s === 'ok')        counts.ok++;
+    else if(s === 'fail') counts.fail++;
+    else                  counts.warn++;
+  });
+
+  // Summary bar
+  const summaryHtml = `
+    <div class="dr-summary-bar">
+      <div class="dr-sum-cell ok">✅ 通过 <strong>${counts.ok}</strong></div>
+      <div class="dr-sum-cell warn">⚠️ 警告 <strong>${counts.warn}</strong></div>
+      <div class="dr-sum-cell fail">❌ 失败 <strong>${counts.fail}</strong></div>
+      <div style="margin-left:auto;font-size:11px;color:var(--t3)">${date} · ${runtime}</div>
+    </div>`;
+
+  // Check rows
+  const checksHtml = checks.map(c => {
+    const s   = (c.status||'skip').toLowerCase();
+    const cls = STATUS_CLS[s] || 'warn';
+    const badge = STATUS_BADGE[s] || '➖';
+    const details = (c.details && c.details.length)
+      ? `<ul style="margin:6px 0 0 16px;padding:0;font-size:12px;color:var(--t2)">
+           ${c.details.map(d=>`<li>${esc(d)}</li>`).join('')}
+         </ul>`
+      : '';
+    return `
+      <div class="dr-check ${cls}">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="dr-check-badge">${badge}</span>
+          <span class="dr-check-id" style="font-size:11px;color:var(--t3);min-width:48px">${esc(c.id||'')}</span>
+          <span class="dr-check-name" style="font-weight:600;font-size:13px">${esc(c.name||'')}</span>
+          <span class="dr-check-summary" style="margin-left:auto;font-size:12px;color:var(--t2)">${esc(c.summary||'')}</span>
+        </div>
+        ${details}
+      </div>`;
+  }).join('');
+
+  // P&L summary table
+  let pnlHtml = '';
+  const providers = Object.keys(pnl);
+  if(providers.length){
+    const rows = providers.map(prov => {
+      const p = pnl[prov] || {};
+      const pnlVal  = p.day_pnl != null   ? (p.day_pnl >= 0 ? `+$${p.day_pnl.toFixed(2)}` : `-$${Math.abs(p.day_pnl).toFixed(2)}`) : '—';
+      const pnlCls  = p.day_pnl != null   ? (p.day_pnl >= 0 ? 'style="color:var(--green)"' : 'style="color:var(--red)"') : '';
+      const trades  = p.trades  != null   ? p.trades  : '—';
+      const cash    = p.cash    != null   ? `$${Number(p.cash).toLocaleString()}` : '—';
+      return `<tr>
+        <td style="font-weight:600">${esc(prov)}</td>
+        <td ${pnlCls}>${pnlVal}</td>
+        <td>${trades}</td>
+        <td>${cash}</td>
+      </tr>`;
+    }).join('');
+    pnlHtml = `
+      <div class="section-card" style="margin-top:12px">
+        <div class="section-title"><span>💰 当日盈亏汇总</span></div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="color:var(--t3);font-size:11px;border-bottom:1px solid var(--border)">
+              <th style="text-align:left;padding:4px 8px">模型</th>
+              <th style="text-align:left;padding:4px 8px">当日盈亏</th>
+              <th style="text-align:left;padding:4px 8px">交易次数</th>
+              <th style="text-align:left;padding:4px 8px">剩余现金</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  // Disclaimer
+  const disclaimer = `<div style="font-size:11px;color:var(--t3);margin-top:12px;text-align:center">
+    日检为执行层健康检查，不影响策略决策 · 仅供系统诊断参考
+  </div>`;
+
+  el.innerHTML = `
+    <div class="section-card">
+      <div class="section-title"><span>🔬 执行健康检查 — ${esc(date)}</span></div>
+      ${summaryHtml}
+      <div style="margin-top:8px">${checksHtml}</div>
+    </div>
+    ${pnlHtml}
+    ${disclaimer}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
