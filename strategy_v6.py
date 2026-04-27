@@ -761,6 +761,21 @@ _D6_SELF_REVIEW = (
     "（不同技术位/不同催化剂/不同时间框架）。若无法写出2条实质差异，输出HOLD。\n"
 )
 
+# FIX-5: Machine-parsing warning injected immediately BEFORE the DECISION block.
+# Placement at the very end of the prompt keeps it freshest in the model's context
+# window when generating — format discipline weakens for rules stated earlier.
+# Root cause observed: Claude writes verbose narrative inside DECISION block instead
+# of pipe-delimited rows; DeepSeek omits the DECISION header entirely.
+# These failures cause prose_fallback / synthetic_hold and block all trade execution.
+_FORMAT_WARN = (
+    "[系统解析要求 — 不可忽略]\n"
+    "DECISION块由代码自动解析。必须严格使用竖线格式，一行一条决策:\n"
+    "  BUY|SYM|N|信号+C:X/10+ATR=$X+止损=$X(-Y%)+目标=$X(+Z%)+RR=W+Vol:Xm/20d:Ym/Ratio:Z×|[时间框架]\n"
+    "  SELL|SYM|N|理由|C:X/10\n"
+    "  HOLD||0|原因\n"
+    "自然语言描述 = 代码无法解析 = 交易不执行。无操作时输出 HOLD||0|观望。\n"
+)
+
 
 def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                     news_summary: str, log_summary: str = "",
@@ -779,11 +794,14 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
         # Note: "黄金入场" was renamed to "最佳入场时段" — the original Chinese label
         # caused AI models to interpret "黄金" as gold (the commodity) and recommend
         # GLD/IAU/GOLD ETFs that were not in the watchlist.
+        # FIX-5: _FORMAT_WARN injected immediately before _DEC so it is the freshest
+        # context the model sees when writing the DECISION block — prevents prose drift.
         return (f"量化交易员 10:00ET 开盘30min后 最佳入场时段\n\n账户: {portfolio}\n\n"
                 f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
                 + _WATCHLIST_GUARD
                 + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n"
                 + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
+                + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
                 + _DEC
                 + "\nNEXT_ACTION: 下一步观察重点")
     if session == "mid":
@@ -794,6 +812,7 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + "持仓评估: ▸ SYM|盈亏%|≈XR|止损=$X|建议\n\n"
                 + _CHECKLIST + "\n"
                 + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
+                + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
                 + _DEC
                 + "\nNEXT_ACTION: 收尾策略")
     if session == "closing":
@@ -802,6 +821,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + _WATCHLIST_GUARD
                 + "过夜4条件: ①当日盈利 ②无重大宏观 ③无隔夜财报 ④Regime≠Chop\n\n"
                 "每仓: ▸ SYM|盈亏%|XR|决定:过夜/平仓|理由\n\n"
+                # FIX-5: format warning before DECISION so closing SELLs stay structured
+                + _FORMAT_WARN + "\n"
                 # BUG-2: closing SELL must also carry C:X/10 so confidence is logged
                 "DECISION:\nSELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n\n"
                 "NEXT_ACTION: 明日盘前重点")
@@ -919,6 +940,14 @@ def execute_decisions(decisions: list, state: dict, session: str,
         if action == "BUY":
             if session == "closing":
                 executed.append(f"⚠️ {sym} 收尾禁止新开仓"); continue
+            # FIX-3: block prose_fallback BUYs — R:R, signal quality and ATR cannot be
+            # verified from a prose parse.  The AI must use structured pipe format.
+            # This prevents unverified entries from bypassing every downstream gate.
+            if d.get("parse_mode") == "prose_fallback":
+                executed.append(
+                    f"⚠️ {sym} prose_fallback BUY 拦截 — "
+                    f"AI未使用竖线格式，无法验证R:R/信号/ATR，不执行"
+                ); continue
             regime = state.get("currentRegime", "Trend")
             min_conf = CFG.SCORE_MIN_TRANSITION if regime == "Transition" else CFG.SCORE_MIN_NORMAL
             if conf < min_conf:

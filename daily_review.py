@@ -51,8 +51,15 @@ DESIGN CONSTRAINTS
 
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
+
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo("America/New_York")
+except ImportError:
+    # Python < 3.9: use fixed UTC-4 offset (EDT; close enough for date-boundary use)
+    _ET = timezone(timedelta(hours=-4))
 
 logger = logging.getLogger("quant.daily")
 
@@ -67,6 +74,39 @@ _ALL_PROVIDERS = ["grok", "deepseek", "claude"]
 # Expected ATR as fraction of stock price (0.3% – 8%)
 _ATR_MIN_RATIO = 0.003
 _ATR_MAX_RATIO = 0.08
+
+# FIX-1: Session "due-by" times in ET (hour, minute).
+# = cron fire time + 45 min buffer for AI call + storage latency.
+# Used to suppress false WARN when the daily review is run mid-day and
+# future sessions simply haven't been scheduled yet.
+#   premarket  cron 09:15 ET  → due by 10:00 ET
+#   opening    cron 10:00 ET  → due by 10:45 ET
+#   mid        cron 12:00 ET  → due by 12:45 ET
+#   closing    cron 15:30 ET  → due by 16:15 ET
+_SESSION_DUE_BY_ET: dict = {
+    "premarket": (10,  0),
+    "opening":   (10, 45),
+    "mid":       (12, 45),
+    "closing":   (16, 15),
+}
+
+
+def _sessions_due_by_now(date: str) -> list:
+    """Return which sessions should already be in the logs for *date*.
+
+    For any past date all 4 sessions are expected.
+    For today only sessions whose cron window + buffer has elapsed in ET
+    are expected — this prevents false WARN when the review is run
+    mid-day before mid/closing have had a chance to fire.
+    """
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if date < today_utc:
+        return list(_ALL_SESSIONS)   # past date — all 4 expected
+    now_et = datetime.now(_ET)
+    return [
+        sess for sess in _ALL_SESSIONS
+        if (now_et.hour, now_et.minute) >= _SESSION_DUE_BY_ET[sess]
+    ]
 
 # ─── Helpers ─────────────────────────────────────────────────────
 
@@ -91,20 +131,48 @@ def _parse_rr_from_reason(reason: str) -> Optional[float]:
 
 def _count_score_lines(ai_text: str) -> int:
     """Count scored stock lines in the AI SCORE output section.
-    BUG-3 fix: pattern now handles class-share tickers like BRK.B and BF.A.
-    Matches: ▸ AAPL, ▸ BRK.B, > NVDA, etc.
+
+    FIX-2: single combined regex handles all bullet styles and bullet-less lines.
+    The |[↑↓→] anchor is the key discriminator — it matches the pipe-delimited
+    SCORE format (SYM|direction|C:X/10|...) without false-positives on prose
+    ticker mentions, since '|↑' / '|↓' / '|→' is never used in free text.
+    The bullet group is optional (?: ... )? so models that omit it are still counted.
+
+    Matches (with any leading whitespace):
+      ▸ AAPL|↑|...    (preferred — prompt template)
+      - AAPL|↑|...    (Grok variant)
+      • NVDA|↑|...
+      * MSFT|↓|...
+      > SPY|→|...
+      → TSLA|↑|...
+      AMZN|↑|...      (no bullet — some models skip the prefix entirely)
+
+    Also handles dot-tickers (BRK.B, BF.A) from the earlier BUG-3 fix.
     """
-    return len(re.findall(r'^\s*[▸►▷>]\s*[A-Z][A-Z0-9.]{0,5}\b', ai_text, re.MULTILINE))
+    return len(re.findall(
+        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|[↑↓→]',
+        ai_text, re.MULTILINE,
+    ))
 
 
 # ─── Individual Checks ───────────────────────────────────────────
 
 def _chk1_session_completeness(session_logs: list, date: str) -> dict:
     """
-    CHK-1: Did all 4 sessions fire today for each provider?
+    CHK-1: Did all *due* sessions fire today for each provider?
+
     BUG-4 fix: also flags sessions that fired but returned an AI [ERROR] response
     so a silent API failure doesn't pass as ✅ just because the log entry exists.
+
+    FIX-1: time-aware check — when date is today, only sessions whose cron
+    window + 45 min buffer has elapsed in ET are considered "expected".
+    Running the review at 11:00 ET will never warn about mid/closing not
+    having fired yet; those sessions simply haven't been scheduled.
     """
+    # Determine which sessions are actually expected by now
+    expected_sessions = _sessions_due_by_now(date)
+    not_yet_due       = [s for s in _ALL_SESSIONS if s not in expected_sessions]
+
     fired:     dict = {p: set()  for p in _ALL_PROVIDERS}
     ai_errors: dict = {p: []     for p in _ALL_PROVIDERS}
 
@@ -121,25 +189,32 @@ def _chk1_session_completeness(session_logs: list, date: str) -> dict:
     issues = []
     evidence = {}
     for prov in _ALL_PROVIDERS:
-        missing = [s for s in _ALL_SESSIONS if s not in fired[prov]]
+        missing = [s for s in expected_sessions if s not in fired[prov]]
         found   = sorted(fired[prov])
         errors  = ai_errors[prov]
-        evidence[prov] = {"fired": found, "missing": missing, "ai_errors": errors}
+        evidence[prov] = {
+            "fired": found, "missing": missing, "ai_errors": errors,
+            "not_yet_due": not_yet_due,
+        }
         if missing:
             issues.append(f"{prov}: missing sessions {missing}")
         if errors:
             issues.append(f"{prov}: AI call failed in session(s) {errors}")
 
+    pending_note = (f" (sessions not yet due: {not_yet_due})" if not_yet_due else "")
+
     if not issues:
+        fired_count = len(expected_sessions)
         status  = _OK
-        summary = "All 4 sessions fired with no AI errors for all providers"
-    elif all(len(fired[p]) == 0 for p in _ALL_PROVIDERS):
+        summary = (f"All {fired_count} due session(s) fired with no AI errors"
+                   + pending_note)
+    elif all(len(fired[p]) == 0 for p in _ALL_PROVIDERS) and expected_sessions:
         status  = _FAIL
-        summary = f"No sessions fired at all on {date} — cron may be down"
+        summary = f"No sessions fired at all on {date} — cron may be down{pending_note}"
     else:
         has_ai_errors = any(ai_errors[p] for p in _ALL_PROVIDERS)
         status  = _FAIL if has_ai_errors else _WARN
-        summary = "; ".join(issues)
+        summary = "; ".join(issues) + pending_note
 
     return {"id": "CHK-1", "name": "Session Completeness",
             "status": status, "summary": summary, "evidence": evidence}
@@ -323,48 +398,74 @@ def _chk6_stop_above_entry(states: dict) -> dict:
 def _chk7_rr_gate_enforcement(trade_logs: list) -> dict:
     """
     CHK-7: Any executed BUY whose reason shows RR < 2.0?
-    The R:R gate in execute_decisions should have blocked these.
-    If they appear in the log it means either the gate was bypassed
-    or the AI didn't include RR in the reason string.
+
+    FIX-4: three distinct buckets now — previously prose_fallback BUYs were
+    lumped into "no RR logged" (confusingly blaming the AI for omitting RR
+    when the real problem was parse format).  Separating them gives a clearer
+    signal about each failure mode:
+
+      violations  — structured BUY executed with RR < 2.0 (gate bypass, FAIL)
+      no_rr       — structured BUY executed but AI omitted RR from reason (WARN)
+      prose_buys  — prose_fallback BUY executed without any verifiable RR (WARN;
+                    after Fix-3 the gate now blocks these, so this bucket catches
+                    only trades logged before that fix was deployed)
+
+    Prose_fallback reasons always start with "[prose fallback]" (set by
+    parse_ai_decisions pass-2), which is the reliable discriminator.
     """
-    violations = []
-    no_rr      = []
+    violations = []   # RR < 2.0  →  gate bypass  →  FAIL
+    no_rr      = []   # structured, RR absent from reason  →  WARN
+    prose_buys = []   # prose_fallback BUY  →  WARN (gate now blocks these)
+
     for t in trade_logs:
         if t.get("action") != "BUY":
             continue
         reason = t.get("reason") or ""
-        rr = _parse_rr_from_reason(reason)
-        entry = {
+        entry_base = {
             "symbol":   t.get("symbol"),
             "provider": t.get("ai_provider"),
             "session":  t.get("session"),
-            "rr":       rr,
             "reason":   reason[:100],
         }
+
+        # prose_fallback BUYs: reason field always starts with "[prose fallback]"
+        if reason.startswith("[prose fallback]"):
+            prose_buys.append(entry_base)
+            continue
+
+        # Structured BUY — check for R:R in reason
+        rr = _parse_rr_from_reason(reason)
         if rr is None:
-            no_rr.append(entry)
+            no_rr.append({**entry_base, "rr": None})
         elif rr < 2.0:
-            violations.append(entry)
+            violations.append({**entry_base, "rr": rr})
 
     issues = []
     if violations:
         issues.append(
-            f"{len(violations)} BUY(s) with RR<2.0 executed: "
+            f"{len(violations)} BUY(s) with RR<2.0 executed (gate bypass): "
             + ", ".join(f"{v['provider']}/{v['symbol']} RR={v['rr']}" for v in violations)
         )
     if no_rr:
         issues.append(
-            f"{len(no_rr)} BUY(s) with no RR logged (AI omitted from reason): "
+            f"{len(no_rr)} BUY(s) with no RR in reason (AI omitted): "
             + ", ".join(f"{v['provider']}/{v['symbol']}" for v in no_rr)
         )
+    if prose_buys:
+        issues.append(
+            f"{len(prose_buys)} prose_fallback BUY(s) executed without R:R verification "
+            f"(now blocked by gate fix): "
+            + ", ".join(f"{v['provider']}/{v['symbol']}" for v in prose_buys)
+        )
 
-    status = (_FAIL if violations else _WARN if no_rr else _OK)
+    status  = (_FAIL if violations else _WARN if (no_rr or prose_buys) else _OK)
     summary = ("; ".join(issues) if issues
                else "All executed BUYs have RR ≥ 2.0 logged")
 
     return {"id": "CHK-7", "name": "R:R Gate Enforcement",
             "status": status, "summary": summary,
-            "evidence": {"violations": violations, "missing_rr": no_rr}}
+            "evidence": {"violations": violations, "missing_rr": no_rr,
+                         "prose_fallback": prose_buys}}
 
 
 def _chk8_same_day_reentry(trade_logs: list) -> dict:
