@@ -5,6 +5,7 @@ Maintains identical API surface consumed by the frontend.
 """
 
 import os, json, time, re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 try:
@@ -516,6 +517,7 @@ _news_cache = {}
 
 def get_news_for_items(items: list, limit: int = 5) -> dict:
     result = {}
+    uncached = []
     for item in items:
         sym  = item["symbol"]
         kind = item.get("type", "stock")
@@ -523,14 +525,20 @@ def get_news_for_items(items: list, limit: int = 5) -> dict:
         nc   = _news_cache.get(key)
         if nc and (time.time() - nc["_ts"]) < NEWS_CACHE_TTL:
             result[key] = nc["items"]
-            continue
-        articles = []
-        if kind == "crypto":
-            articles = _fetch_crypto_news(sym, limit)
         else:
-            articles = _fetch_stock_news(sym, limit)
-        _news_cache[key] = {"items": articles, "_ts": time.time()}
-        result[key] = articles
+            uncached.append((key, sym, kind))
+
+    def _fetch_one_news(args):
+        key, sym, kind = args
+        articles = _fetch_crypto_news(sym, limit) if kind == "crypto" else _fetch_stock_news(sym, limit)
+        return key, articles
+
+    if uncached:
+        with ThreadPoolExecutor(max_workers=min(len(uncached), 8)) as _ex:
+            for key, articles in _ex.map(_fetch_one_news, uncached):
+                _news_cache[key] = {"items": articles, "_ts": time.time()}
+                result[key] = articles
+
     return result
 
 def _fetch_stock_news(sym: str, limit: int) -> list:
@@ -601,11 +609,18 @@ def _api_post_with_retry(
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                if r.status_code == 429:
+                    # Respect provider's Retry-After header; cap at 30s to stay
+                    # inside Vercel's 120s function limit.
+                    retry_after = int(r.headers.get("Retry-After", delay))
+                    sleep_secs = min(retry_after, 30)
+                else:
+                    sleep_secs = delay
                 _ai_log.warning(
                     "%s HTTP %s on attempt %d/%d — retrying in %ds",
-                    provider_name, r.status_code, attempt, max_retries, delay,
+                    provider_name, r.status_code, attempt, max_retries, sleep_secs,
                 )
-                time.sleep(delay)
+                time.sleep(sleep_secs)
                 delay *= 2
                 continue
             return r
@@ -647,7 +662,7 @@ def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "cache_control": {"type": "ephemeral"}},
                 ]}],
             },
-            timeout=90,
+            timeout=35,
             provider_name="Claude",
         )
         data = r.json()
@@ -682,7 +697,7 @@ def call_grok(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "Content-Type": "application/json"},
             payload={"model": MODELS["grok"]["model"], "max_tokens": max_tokens,
                      "messages": [{"role": "user", "content": prompt}]},
-            timeout=60,
+            timeout=30,
             provider_name="Grok",
         )
         data = r.json()
@@ -716,7 +731,7 @@ def call_deepseek(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "Content-Type": "application/json"},
             payload={"model": MODELS["deepseek"]["model"], "max_tokens": max_tokens,
                      "messages": [{"role": "user", "content": prompt}]},
-            timeout=75,
+            timeout=30,
             provider_name="DeepSeek",
         )
         data = r.json()
@@ -785,23 +800,30 @@ def run_trade_session(session: str, provider: str) -> dict:
     state["_nowET"]  = now.strftime("%H:%M")
     state["provider"] = provider
 
-    # Fetch prices + server-side ATR estimates
+    # Fetch prices + server-side ATR estimates in parallel (one thread per stock).
+    # Previously sequential (~18s per stock × N stocks); now collapses to the
+    # slowest single fetch.
     prices = {}
     atr_est = {}
-    for s in stock_items:
-        q = get_stock_quote(s["symbol"])
-        if q:
-            price = q.get("c", q.get("pc", 0))
-            prices[s["symbol"]] = price
-            state.setdefault("lastPrices", {})[s["symbol"]] = price
+    _quotes: dict = {}
 
-            # BUG-1b / STRATEGY-5: replace the old 1%-of-price stub with a
-            # genuine server-side ATR.  get_stock_atr() tries Finnhub daily
-            # candles first, then falls back to intraday high-low × 1.3,
-            # then 1.5% of price — all with a 0.3%–8% sanity clamp.
-            atr_est[s["symbol"]] = get_stock_atr(s["symbol"], price)
+    def _fetch_one(s):
+        sym = s["symbol"]
+        q = get_stock_quote(sym)
+        price = q.get("c", q.get("pc", 0)) if q else 0
+        atr = get_stock_atr(sym, price) if q else 0
+        return sym, q, price, atr
 
-    # Fetch news
+    with ThreadPoolExecutor(max_workers=min(len(stock_items), 8)) as _ex:
+        for sym, q, price, atr in _ex.map(_fetch_one, stock_items):
+            if q:
+                prices[sym] = price
+                state.setdefault("lastPrices", {})[sym] = price
+                atr_est[sym] = atr
+                _quotes[sym] = q  # cache for watchlist text below — avoids second fetch
+
+    # Fetch news (also parallelised inside get_news_for_items via cache; runs
+    # after price fetch so the cache is warm for any overlapping calls).
     news_data = get_news_for_items(stock_items, 3)
 
     # Build context
@@ -823,10 +845,11 @@ def run_trade_session(session: str, provider: str) -> dict:
     # STRATEGY-1: include current-day volume (millions) and today's ATR estimate
     # so the AI can verify entry condition ② 量价 without guessing.
     # Format: AAPL $269.59 (+0.15%) Vol:32.1M ATR≈$4.23
+    # Reuse quotes already fetched above — no second round-trip to Finnhub.
     wl_parts = []
     for s in stock_items:
         sym = s["symbol"]
-        q   = get_single_quote(sym, "stock")
+        q   = _quotes.get(sym)
         if q:
             vol_m  = (q.get("v") or 0) / 1_000_000          # shares → millions
             atr_d  = atr_est.get(sym, 0)
