@@ -384,11 +384,19 @@ def get_stock_quote(sym: str) -> dict:
     cache = _price_cache.get(sym)
     if cache and (time.time() - cache["_ts"]) < PRICE_CACHE_TTL:
         return cache
+    _dlog = _logging.getLogger("quant.data")
     try:
         url = f"{FINNHUB_QUOTE_URL}?symbol={sym}&token={FINNHUB_KEY}"
-        r   = requests.get(url, timeout=8)
+        for _attempt in range(3):
+            r = requests.get(url, timeout=8)
+            if r.status_code == 429:
+                _wait = min(int(r.headers.get("Retry-After", 2 ** _attempt)), 10)
+                _dlog.warning("Finnhub quote 429 for %s — retrying in %ds", sym, _wait)
+                time.sleep(_wait)
+                continue
+            break
         if r.status_code != 200:
-            _logging.getLogger("quant.data").warning("Finnhub quote %s: HTTP %s", sym, r.status_code)
+            _dlog.warning("Finnhub quote %s: HTTP %s", sym, r.status_code)
             return None
         q        = r.json()
         c_price  = q.get("c", 0) or 0
@@ -439,7 +447,15 @@ def get_stock_atr(sym: str, price: float) -> float:
         url = (f"https://finnhub.io/api/v1/stock/candle"
                f"?symbol={sym}&resolution=D&from={start_ts}&to={end_ts}"
                f"&token={FINNHUB_KEY}")
-        r = requests.get(url, timeout=10)
+        for _attempt in range(3):
+            r = requests.get(url, timeout=10)
+            if r.status_code == 429:
+                _wait = min(int(r.headers.get("Retry-After", 2 ** _attempt)), 10)
+                _logging.getLogger("quant.atr").warning(
+                    "Finnhub candle 429 for %s — retrying in %ds", sym, _wait)
+                time.sleep(_wait)
+                continue
+            break
         if r.status_code == 200:
             data = r.json()
             highs  = data.get("h", [])
@@ -534,7 +550,7 @@ def get_news_for_items(items: list, limit: int = 5) -> dict:
         return key, articles
 
     if uncached:
-        with ThreadPoolExecutor(max_workers=min(len(uncached), 8)) as _ex:
+        with ThreadPoolExecutor(max_workers=min(len(uncached), 3)) as _ex:
             for key, articles in _ex.map(_fetch_one_news, uncached):
                 _news_cache[key] = {"items": articles, "_ts": time.time()}
                 result[key] = articles
@@ -597,7 +613,7 @@ def _api_post_with_retry(
     payload: dict,
     timeout: int,
     provider_name: str,
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> requests.Response:
     """POST with exponential backoff on transient errors (5xx, 429, connection issues).
     TOKEN-4: prevents a single network hiccup from silently killing a session.
@@ -814,7 +830,9 @@ def run_trade_session(session: str, provider: str) -> dict:
         atr = get_stock_atr(sym, price) if q else 0
         return sym, q, price, atr
 
-    with ThreadPoolExecutor(max_workers=min(len(stock_items), 8)) as _ex:
+    # Cap at 3 workers: avoids bursting Finnhub's 60 req/min free-tier limit when
+    # all 3 provider sessions start simultaneously and each fetches N stocks in parallel.
+    with ThreadPoolExecutor(max_workers=min(len(stock_items), 3)) as _ex:
         for sym, q, price, atr in _ex.map(_fetch_one, stock_items):
             if q:
                 prices[sym] = price
