@@ -626,10 +626,13 @@ def _api_post_with_retry(
             r = requests.post(url, headers=headers, json=payload, timeout=timeout)
             if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
                 if r.status_code == 429:
-                    # Respect provider's Retry-After header; cap at 30s to stay
-                    # inside Vercel's 120s function limit.
+                    # Respect provider's Retry-After header; cap at 10s so the
+                    # total worst-case (sleep + retried POST) stays well inside
+                    # Vercel's 120s function limit. Larger waits trip the wall
+                    # and force a 5xx, which (pre-fix) caused Vercel cron to
+                    # auto-retry the entire session.
                     retry_after = int(r.headers.get("Retry-After", delay))
-                    sleep_secs = min(retry_after, 30)
+                    sleep_secs = min(retry_after, 10)
                 else:
                     sleep_secs = delay
                 _ai_log.warning(
@@ -776,7 +779,55 @@ def call_ai(prompt: str, provider: str = "grok", max_tokens: int = MAX_TOKENS) -
     return call_grok(prompt, max_tokens)
 
 # ─── Trade session runner ─────────────────────────────────────────
+
+# PERF-3: KV-based per-(provider, session) lock. Prevents two concurrent
+# runs of the same session — e.g. the Vercel cron firing while the user
+# also clicks "trigger now" in the dashboard, or two cron invocations
+# overlapping for any reason. A double-run would double API spend, risk
+# duplicate trades, and stretch wall-clock time. SET NX EX is atomic on
+# Upstash; if KV is unavailable we fail-open (return a sentinel "no-op"
+# release) so local dev / KV outages don't block trading entirely.
+_SESSION_LOCK_TTL = 180  # seconds — > Vercel maxDuration so a crashed run
+                         #  cannot leave the lock held forever in practice.
+
+def _acquire_session_lock(provider: str, session: str) -> bool:
+    """Try to claim the lock. Returns True on success, False if already held."""
+    if not (_KV_URL and _KV_TOKEN):
+        return True  # no KV configured → no locking possible, allow.
+    key = f"session_lock:{provider}:{session}"
+    token = f"{int(time.time() * 1000)}-{os.getpid()}"
+    # SET key value NX EX <ttl> — atomic create-if-not-exists with TTL.
+    # Returns "OK" on success, None when the key already exists.
+    res = _kv(["SET", key, token, "NX", "EX", str(_SESSION_LOCK_TTL)])
+    return res == "OK"
+
+def _release_session_lock(provider: str, session: str) -> None:
+    if not (_KV_URL and _KV_TOKEN):
+        return
+    _kv(["DEL", f"session_lock:{provider}:{session}"])
+
+
 def run_trade_session(session: str, provider: str) -> dict:
+    if not _acquire_session_lock(provider, session):
+        _logging.getLogger("quant.session").warning(
+            "[%s/%s] Skipping — another run is already in progress "
+            "(session lock held). This is normal if cron and a manual "
+            "trigger raced; the in-flight run will complete on its own.",
+            provider, session)
+        return {
+            "state": load_trade_state(provider), "aiText": "", "executed": [],
+            "exec_log": [{"status": "skipped",
+                          "detail": "session lock held — another run in progress"}],
+            "decisions_parsed": 0, "decisions_executed": 0,
+            "session": session, "provider": provider,
+        }
+    try:
+        return _run_trade_session_locked(session, provider)
+    finally:
+        _release_session_lock(provider, session)
+
+
+def _run_trade_session_locked(session: str, provider: str) -> dict:
     state = load_trade_state(provider)
     stocks = load_watchlist()
     all_stock_items = [s for s in stocks if s.get("type") == "stock"]
@@ -1188,18 +1239,32 @@ def api_daily_review(date: str = None):
 
 _VALID_SESSIONS  = {"premarket", "opening", "mid", "closing"}
 _VALID_PROVIDERS = {"grok", "claude", "deepseek"}
-_CRON_SECRET     = os.environ.get("CRON_SECRET", "")  # optional auth
+_CRON_SECRET     = os.environ.get("CRON_SECRET", "")  # required on Vercel
+# Escape hatch for local development only. Set CRON_ALLOW_UNAUTH=1 in your
+# local env to bypass auth; never set this on Vercel.
+_CRON_ALLOW_UNAUTH = os.environ.get("CRON_ALLOW_UNAUTH", "").lower() in ("1", "true", "yes")
 
 
 def _verify_cron(req) -> bool:
     """
     Verify the request is from Vercel's cron runner.
-    Vercel sends the Authorization header when CRON_SECRET is set
-    in environment variables. If CRON_SECRET is empty, allow all
-    (useful for manual testing via curl).
+
+    Vercel automatically injects `Authorization: Bearer <CRON_SECRET>` on
+    cron-triggered requests when the CRON_SECRET env var is set. We require
+    it — otherwise any external caller (uptime monitor, crawler, stale tab)
+    can fire a real trading session, which combined with Vercel's cron
+    auto-retry was causing duplicate invocations and 10+ minute wall times.
+
+    Local dev: set CRON_ALLOW_UNAUTH=1 to bypass.
     """
-    if not _CRON_SECRET:
+    if _CRON_ALLOW_UNAUTH:
         return True
+    if not _CRON_SECRET:
+        # Fail closed: missing secret = block, do not silently allow.
+        _logging.getLogger("quant.cron").error(
+            "CRON_SECRET is not set — rejecting request. "
+            "Set CRON_SECRET on Vercel (Project Settings → Environment Variables).")
+        return False
     auth = req.headers.get("Authorization", "")
     return auth == f"Bearer {_CRON_SECRET}"
 
@@ -1239,7 +1304,12 @@ def cron_run(session, provider):
     except Exception as e:
         _logging.getLogger("quant.cron").error(
             "Cron error: session=%s provider=%s error=%s", session, provider, e)
-        return jsonify({"ok": False, "error": str(e)}), 500
+        # Return 200 (not 500) so Vercel Cron does NOT auto-retry. A retry
+        # would re-run the AI call, double-bill API spend, risk duplicate
+        # trades, and stretch the wall-clock to 6-12 minutes for a single
+        # logical session. The error is captured in logs and the JSON body.
+        return jsonify({"ok": False, "session": session, "provider": provider,
+                        "error": str(e)}), 200
 
 
 @app.route("/api/cron/status", methods=["GET"])
@@ -1307,7 +1377,8 @@ def cron_weekend_feedback():
                         "providers_analyzed": providers})
     except Exception as e:
         _logging.getLogger("quant.cron").error("Weekend feedback error: %s", e)
-        return jsonify({"ok": False, "error": str(e)}), 500
+        # 200 to disable Vercel cron auto-retry (see cron_run for rationale).
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 @app.route("/api/cron/watchlist-suggestions", methods=["GET"])
@@ -1340,7 +1411,8 @@ def cron_watchlist_suggestions():
         })
     except Exception as e:
         _logging.getLogger("quant.cron").error("Watchlist suggestions error: %s", e)
-        return jsonify({"ok": False, "error": str(e)}), 500
+        # 200 to disable Vercel cron auto-retry (see cron_run for rationale).
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 @app.route("/api/kv-status", methods=["GET"])
