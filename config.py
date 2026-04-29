@@ -43,7 +43,7 @@ PORT         = int(_env("PORT", "5000"))
 # Change these if you want to pin to a specific model version.
 MODELS = {
     "claude": {
-        "model":    "claude-sonnet-4-20250514",
+        "model":    "claude-sonnet-4-6",
         "api_url":  "https://api.anthropic.com/v1/messages",
         "env_key":  "CLAUDE_KEY",
         "display":  "Claude",

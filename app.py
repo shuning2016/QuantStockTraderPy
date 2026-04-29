@@ -372,7 +372,7 @@ def session_for_now() -> str:
     """Determine which trading session we are in based on ET time."""
     t = now_et()
     h = t.hour + t.minute / 60
-    if h < 9.25:  return "premarket"
+    if h < 9.5:   return "premarket"
     if h < 12.0:  return "opening"
     if h < 15.0:  return "mid"
     return "closing"
@@ -681,8 +681,9 @@ def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "cache_control": {"type": "ephemeral"}},
                 ]}],
             },
-            timeout=35,
+            timeout=90,
             provider_name="Claude",
+            max_retries=1,
         )
         data = r.json()
         if not r.ok or not data.get("content"):
@@ -716,8 +717,9 @@ def call_grok(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "Content-Type": "application/json"},
             payload={"model": MODELS["grok"]["model"], "max_tokens": max_tokens,
                      "messages": [{"role": "user", "content": prompt}]},
-            timeout=30,
+            timeout=60,
             provider_name="Grok",
+            max_retries=1,
         )
         data = r.json()
         if not r.ok or not data.get("choices"):
@@ -750,8 +752,9 @@ def call_deepseek(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "Content-Type": "application/json"},
             payload={"model": MODELS["deepseek"]["model"], "max_tokens": max_tokens,
                      "messages": [{"role": "user", "content": prompt}]},
-            timeout=30,
+            timeout=60,
             provider_name="DeepSeek",
+            max_retries=1,
         )
         data = r.json()
         if not r.ok or not data.get("choices"):
@@ -1318,9 +1321,6 @@ def cron_status():
     Returns the last run time for each session/provider combination.
     Frontend polls this to show the trigger status panel.
     """
-    if not _verify_cron(request):
-        return jsonify({"error": "Unauthorized"}), 401
-
     status = {}
     for provider in _VALID_PROVIDERS:
         try:
