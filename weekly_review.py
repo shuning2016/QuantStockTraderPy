@@ -302,7 +302,7 @@ def run_weekend_feedback(from_date: str,
 
         prompt = build_feedback_prompt(provider, decisions, from_date, to_date)
         try:
-            ai_report = call_ai_fn(prompt, "claude")
+            ai_report = call_ai_fn(prompt, "claude", 2000)
         except Exception as e:
             logger.error("AI feedback call failed for %s: %s", provider, e)
             ai_report = f"[ERROR] 分析生成失败: {e}"
@@ -667,7 +667,7 @@ def run_watchlist_suggestions(from_date: str,
         sector_perf, market_news, current_watchlist, from_date, to_date)
 
     try:
-        ai_text = call_ai_fn(prompt, "claude")
+        ai_text = call_ai_fn(prompt, "claude", 2000)
     except Exception as e:
         logger.error("Watchlist suggestion AI call failed: %s", e)
         ai_text = f"[ERROR] AI分析生成失败: {e}"

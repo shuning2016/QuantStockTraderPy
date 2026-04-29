@@ -6,7 +6,7 @@ Maintains identical API surface consumed by the frontend.
 
 import os, json, time, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 try:
     from zoneinfo import ZoneInfo
@@ -441,7 +441,6 @@ def get_stock_atr(sym: str, price: float) -> float:
     atr: float = price * 0.015   # fallback: 1.5% of price
 
     try:
-        import math as _math
         end_ts   = int(time.time())
         start_ts = end_ts - 30 * 86400  # 30 calendar days → ≈20 trading days
         url = (f"https://finnhub.io/api/v1/stock/candle"
@@ -560,8 +559,9 @@ def get_news_for_items(items: list, limit: int = 5) -> dict:
 def _fetch_stock_news(sym: str, limit: int) -> list:
     try:
         today = today_et()
+        from_dt = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
         url   = (FINNHUB_NEWS_URL
-                 + f"?symbol={sym}&from=2020-01-01&to={today}&token={FINNHUB_KEY}")
+                 + f"?symbol={sym}&from={from_dt}&to={today}&token={FINNHUB_KEY}")
         r = requests.get(url, timeout=8)
         if r.status_code != 200:
             return []
@@ -1121,7 +1121,7 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                           "current_price": prices.get(sym, h["avgCost"])}
                          for sym, h in state["holdings"].items()],
         },
-        "ai_analysis": ai_text[:2000],
+        "ai_analysis": ai_text[:6000],
         "executed":    executed,
         "exec_log":    exec_log,
         # BUG-5 fix: store raw decision parse modes so CHK-3 can read them for
@@ -1326,7 +1326,7 @@ def cron_status():
         try:
             # Read the most recent session log entry for this provider
             today = today_et()
-            from_date = (datetime.now(_ET) - __import__('datetime').timedelta(days=2)).strftime("%Y-%m-%d")
+            from_date = (datetime.now(_ET) - timedelta(days=2)).strftime("%Y-%m-%d")
             sessions = read_log_range("sessions", from_date, today, provider)
             if sessions:
                 last = sessions[0]  # already sorted newest-first
@@ -1461,7 +1461,7 @@ def dispatch(action: str, data: dict):
     # AI analysis (free-form)
     if action == "analyzeStock":
         provider = data.get("provider", "grok")
-        return call_ai(data["prompt"], provider)
+        return call_ai(data["prompt"], provider, 2000)
 
     # Trade state
     if action == "getTradeState":
