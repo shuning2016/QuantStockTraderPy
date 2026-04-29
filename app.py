@@ -1121,7 +1121,7 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                           "current_price": prices.get(sym, h["avgCost"])}
                          for sym, h in state["holdings"].items()],
         },
-        "ai_analysis": ai_text[:6000],
+        "ai_analysis": ai_text,
         "executed":    executed,
         "exec_log":    exec_log,
         # BUG-5 fix: store raw decision parse modes so CHK-3 can read them for

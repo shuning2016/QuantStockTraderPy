@@ -156,7 +156,7 @@ def _count_score_lines(ai_text: str) -> int:
     # We match the pipe + any non-whitespace char sequence that isn't a number
     # (to avoid matching position-eval lines like ▸ SYM|+2.5%|...).
     return len(re.findall(
-        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|[↑↓→=\-]',
+        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|\s*[↑↓→=\-]',
         ai_text, re.MULTILINE,
     ))
 

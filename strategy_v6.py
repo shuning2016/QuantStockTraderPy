@@ -472,6 +472,20 @@ def parse_ai_decisions(ai_text):
                 "parse_mode": "structured",
             })
             continue
+        # Handle HOLD||0|reason (empty symbol, as shown in prompt template).
+        # The main regex requires {1,12} chars for the symbol group so HOLD||0|...
+        # falls through without this dedicated case — causing synthetic_hold even
+        # when the AI correctly followed the HOLD||0|原因 format.
+        m_hold = _re.match(r"^HOLD\|\|(\d*)\|?(.*)", normalised, _re.IGNORECASE)
+        if m_hold:
+            decisions.append({
+                "action":     "HOLD",
+                "symbol":     "",
+                "shares":     int(m_hold.group(1)) if m_hold.group(1).isdigit() else 0,
+                "reason":     m_hold.group(2).strip() or "no_action",
+                "parse_mode": "structured",
+            })
+            continue
         # Handle bare "HOLD" line (AI omits pipes when no positions to manage)
         if _re.match(r"^HOLD\s*$", normalised, _re.IGNORECASE):
             decisions.append({
@@ -513,7 +527,18 @@ def parse_ai_decisions(ai_text):
                 "symbol":     _m.group(2).upper(),
                 "shares":     int(_sh) if _sh.isdigit() else 0,
                 "reason":     _m.group(4).strip(),
-                "parse_mode": "structured",   # format IS correct, header was just missing
+                "parse_mode": "structured",
+            })
+            continue
+        # Handle HOLD||0|reason in headerless scan (same fix as Pass 1)
+        _m_hold = _re.match(r"^HOLD\|\|(\d*)\|?(.*)", _s, _re.IGNORECASE)
+        if _m_hold:
+            _headerless.append({
+                "action":     "HOLD",
+                "symbol":     "",
+                "shares":     int(_m_hold.group(1)) if _m_hold.group(1).isdigit() else 0,
+                "reason":     _m_hold.group(2).strip() or "no_action",
+                "parse_mode": "structured",
             })
             continue
         # Bare "HOLD" line with no pipes
@@ -820,11 +845,13 @@ _D6_SELF_REVIEW = (
 # These failures cause prose_fallback / synthetic_hold and block all trade execution.
 _FORMAT_WARN = (
     "[系统解析要求 — 不可忽略]\n"
-    "DECISION块由代码自动解析。必须严格使用竖线格式，一行一条决策:\n"
+    "DECISION块由代码自动解析，只接受竖线分隔格式，一行一条，禁止自然语言描述:\n"
     "  BUY|SYM|N|信号+C:X/10+ATR=$X+止损=$X(-Y%)+目标=$X(+Z%)+RR=W+Vol:Xm/20d:Ym/Ratio:Z×|[时间框架]\n"
     "  SELL|SYM|N|理由|C:X/10\n"
     "  HOLD||0|原因\n"
-    "自然语言描述 = 代码无法解析 = 交易不执行。无操作时输出 HOLD||0|观望。\n"
+    "❌ 错误(代码无法读取): DECISION: 由于NVDA突破关键阻力位，建议买入50股，设置止损...\n"
+    "✅ 正确: BUY|NVDA|50|突破$XXX+C:7/10+ATR=$X+止损=$X(-2%)+目标=$X(+5%)+RR=2.5+Vol:Xm/20d:Ym/Ratio:1.8×|[SWING 2-5d]\n"
+    "无操作时必须输出: HOLD||0|观望\n"
 )
 
 
