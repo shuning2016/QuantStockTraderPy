@@ -681,7 +681,7 @@ def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                      "cache_control": {"type": "ephemeral"}},
                 ]}],
             },
-            timeout=90,
+            timeout=75,
             provider_name="Claude",
             max_retries=1,
         )
