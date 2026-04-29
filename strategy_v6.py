@@ -485,6 +485,50 @@ def parse_ai_decisions(ai_text):
     if decisions:
         return decisions
 
+    # ── Pass 1.5: headerless structured block ─────────────────────
+    # AI produced correct pipe-format decisions but omitted the DECISION: header.
+    # Root cause: some models (DeepSeek) complete the analysis and write pipe-
+    # formatted rows without the required header — Pass 1 finds nothing and the
+    # trade is lost to a synthetic_hold.  Scan the last 50 lines for bare
+    # BUY|SYM|N|... rows.  SCORE lines (▸ SYM|↑|...) won't match because they
+    # don't start with BUY/SELL/HOLD; position-eval lines (▸ SYM|+2%|...) won't
+    # match for the same reason.  These are still 'structured' — format IS correct.
+    _headerless = []
+    for _line in ai_text.strip().split("\n")[-50:]:
+        _s = _re.sub(r"\*{1,2}", "", _line.strip())
+        _s = _re.sub(r"\s*\|\s*", "|", _s)
+        # Normalise Chinese action words (same mapping as Pass 1)
+        _s = _re.sub(r"^(?:买入|建仓|开仓|做多|入场)", "BUY",  _s)
+        _s = _re.sub(r"^(?:卖出|平仓|清仓|减仓|做空)", "SELL", _s)
+        _s = _re.sub(r"^(?:持有|持仓|不操作|观望|不变)", "HOLD", _s)
+        # Match exactly the same pipe pattern as Pass 1
+        _m = _re.match(
+            r"(BUY|SELL|HOLD)\|([A-Z0-9.]{1,12})\|(\d*)\|?(.*)",
+            _s, _re.IGNORECASE,
+        )
+        if _m:
+            _sh = _m.group(3)
+            _headerless.append({
+                "action":     _m.group(1).upper(),
+                "symbol":     _m.group(2).upper(),
+                "shares":     int(_sh) if _sh.isdigit() else 0,
+                "reason":     _m.group(4).strip(),
+                "parse_mode": "structured",   # format IS correct, header was just missing
+            })
+            continue
+        # Bare "HOLD" line with no pipes
+        if _re.match(r"^HOLD\s*$", _s, _re.IGNORECASE):
+            _headerless.append({
+                "action":     "HOLD",
+                "symbol":     "",
+                "shares":     0,
+                "reason":     "no_action",
+                "parse_mode": "structured",
+            })
+
+    if _headerless:
+        return _headerless
+
     # ── Pass 2: prose fallback ────────────────────────────────────
     # AI wrote natural language instead of pipe format.
     # We extract the intent conservatively (only clear BUY/SELL signals).
@@ -732,8 +776,15 @@ _COMMON = ("风控: 仓位=净值×1.5%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止
            # BUG-3: trailing multipliers updated to 2.0/1.5 — prompt kept in sync
            "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-2.0ATR|盈≥2R→最高价-1.5ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
-_SCORE  = "▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
-_DEC    = ("DECISION:\n"
+_SCORE  = ("▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
+           # Concrete example — helps models understand the exact pipe format required.
+           # Not parsed by the check (appears in prompt, not AI response).
+           "  例: ▸ NVDA|↑|C:7/10|①趋势Y ②量价(Vol:52m/20d:38m/Ratio:1.4×)Y ③P(up)=0.72\n")
+_DEC    = (# FIX-2: 【必须输出】prefix added. Current root-cause: Claude writes narrative
+           # inside the DECISION block; DeepSeek omits the DECISION header entirely.
+           # The imperative note + "无交易写HOLD" covers both failure modes.
+           "【必须输出，不可省略，无交易也须写HOLD||0|原因】\n"
+           "DECISION:\n"
            "BUY|SYM|N|信号+C:X/10+ATR=$X+止损=$X(-Y%)+目标=$X(+Z%)+RR=W"
            "+Vol:Xm/20d:Ym/Ratio:Z×|[SWING 2-5d]或[INTRADAY]\n"
            # BUG-2: SELL must include |C:X/10 so parse_confidence_score can extract it;
@@ -823,7 +874,10 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 "每仓: ▸ SYM|盈亏%|XR|决定:过夜/平仓|理由\n\n"
                 # FIX-5: format warning before DECISION so closing SELLs stay structured
                 + _FORMAT_WARN + "\n"
-                # BUG-2: closing SELL must also carry C:X/10 so confidence is logged
+                # FIX-3: 【必须输出】imperative mirrors _DEC treatment — closing had its
+                # own inline DECISION string which lacked the mandatory-output prefix.
+                # BUG-2: SELL must carry C:X/10 so confidence is logged.
+                "【必须输出，收尾禁止新开仓，无平仓写HOLD||0|原因】\n"
                 "DECISION:\nSELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n\n"
                 "NEXT_ACTION: 明日盘前重点")
     return ""

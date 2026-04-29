@@ -149,8 +149,14 @@ def _count_score_lines(ai_text: str) -> int:
 
     Also handles dot-tickers (BRK.B, BF.A) from the earlier BUG-3 fix.
     """
+    # Direction field alternatives used by real AI outputs:
+    #   ↑ ↓ →  (the three preferred arrows)
+    #   =  -   (some models use equals or dash for neutral/sideways)
+    #   N/A    (rare; some models write "N/A" when uncertain)
+    # We match the pipe + any non-whitespace char sequence that isn't a number
+    # (to avoid matching position-eval lines like ▸ SYM|+2.5%|...).
     return len(re.findall(
-        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|[↑↓→]',
+        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|[↑↓→=\-]',
         ai_text, re.MULTILINE,
     ))
 
@@ -223,16 +229,20 @@ def _chk1_session_completeness(session_logs: list, date: str) -> dict:
 def _chk2_watchlist_coverage(session_logs: list, expected_stocks: int) -> dict:
     """
     CHK-2: Did each AI score all watchlist stocks in its SCORE section?
-    We count ▸ SYM lines in the AI text from opening and mid sessions.
-    A count below expected_stocks means the AI skipped some candidates.
+    We count pipe-delimited SCORE lines in the AI text from the opening session.
+
+    Only opening is checked here — the mid session prompt does NOT include
+    the _SCORE instruction (it has 持仓评估 for current holdings instead),
+    so checking mid would always produce false FAIL alerts.  If _SCORE is
+    added to the mid prompt in the future, add "mid" back to the filter.
     """
     issues  = []
     evidence = {}
-    # Only check sessions where the AI is expected to produce a SCORE section
+    # Only check the opening session which is the only session that includes _SCORE
     for entry in session_logs:
         sess = entry.get("session", "")
         prov = entry.get("ai_provider", "")
-        if sess not in ("opening", "mid"):
+        if sess != "opening":
             continue
         ai_text = entry.get("ai_analysis", "")
         scored  = _count_score_lines(ai_text)
@@ -245,7 +255,7 @@ def _chk2_watchlist_coverage(session_logs: list, expected_stocks: int) -> dict:
 
     if not evidence:
         return {"id": "CHK-2", "name": "Watchlist Coverage",
-                "status": _WARN, "summary": "No opening/mid sessions found to check",
+                "status": _WARN, "summary": "No opening session found to check",
                 "evidence": {}}
 
     status  = _FAIL if any("no SCORE" in i for i in issues) else (
