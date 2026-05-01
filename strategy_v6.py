@@ -1020,13 +1020,17 @@ _DEC_CLAUDE_NOTE = (
 
 def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                     news_summary: str, log_summary: str = "",
-                    focus_note: str = "", provider: str = "") -> str:
+                    focus_note: str = "", provider: str = "") -> tuple:
     """Build the session prompt.
+
+    Returns (system_text, user_text) so callers can route static rules into
+    a cacheable system message and dynamic market data into the user message.
+    For Claude this enables real prompt-cache hits (system is identical for the
+    same session type; only portfolio/watchlist/news change).
 
     `provider` is optional; when provided, a small per-provider note is
     appended to address each model's known failure mode (see
-    PROVIDER_OVERRIDES / improvement_plan_2026-05-01.md).  Backward
-    compatible: callers that don't pass it get the legacy shared prompt.
+    PROVIDER_OVERRIDES / improvement_plan_2026-05-01.md).
     """
     provider_note = ""
     p = (provider or "").lower()
@@ -1034,66 +1038,87 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
         provider_note = _DEC_DEEPSEEK_NOTE
     elif p == "claude":
         provider_note = _DEC_CLAUDE_NOTE
+
     if session == "premarket":
-        return (f"量化交易员 9:15ET 盘前｜只分析不交易\n\n账户: {portfolio}\n\n"
-                f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
-                + _WATCHLIST_GUARD
-                + _COMMON
-                + "Regime判断(A10): SPY ADX(14)→Trend(>25)/Transition(20-25)/Chop(<20)\n"
-                "Chop=禁新仓|Transition=置信度提至C:7+\n\n"
-                "输出:\n📊 Regime: [Trend/Transition/Chop] SPY:[简述]\n\n"
-                + _SCORE + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)"
-                + provider_note)
+        system = (
+            "量化交易员 9:15ET 盘前｜只分析不交易\n\n"
+            + _WATCHLIST_GUARD
+            + _COMMON
+            + "Regime判断(A10): SPY ADX(14)→Trend(>25)/Transition(20-25)/Chop(<20)\n"
+              "Chop=禁新仓|Transition=置信度提至C:7+\n\n"
+              "输出:\n📊 Regime: [Trend/Transition/Chop] SPY:[简述]\n\n"
+            + _SCORE + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)"
+            + provider_note
+        )
+        user = (f"账户: {portfolio}\n\n"
+                f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}")
+        return system, user
+
     if session == "opening":
         # Note: "黄金入场" was renamed to "最佳入场时段" — the original Chinese label
         # caused AI models to interpret "黄金" as gold (the commodity) and recommend
         # GLD/IAU/GOLD ETFs that were not in the watchlist.
         # FIX-5: _FORMAT_WARN injected immediately before _DEC so it is the freshest
         # context the model sees when writing the DECISION block — prevents prose drift.
-        return (f"量化交易员 10:00ET 开盘30min后 最佳入场时段\n\n账户: {portfolio}\n\n"
-                f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
-                + _WATCHLIST_GUARD
-                + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n"
-                + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
-                + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
-                + _DEC
-                + "\nNEXT_ACTION: 下一步观察重点"
-                + provider_note)
+        system = (
+            "量化交易员 10:00ET 开盘30min后 最佳入场时段\n\n"
+            + _WATCHLIST_GUARD
+            + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n"
+            + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
+            + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
+            + _DEC
+            + "\nNEXT_ACTION: 下一步观察重点"
+            + provider_note
+        )
+        user = (f"账户: {portfolio}\n\n"
+                f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}")
+        return system, user
+
     if session == "mid":
-        return (f"量化交易员 12:00ET 中盘复盘\n\n账户: {portfolio}\n\n"
-                f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}\n\n"
-                + _WATCHLIST_GUARD
-                + _COMMON
-                + "持仓评估: ▸ SYM|盈亏%|≈XR|止损=$X|建议\n\n"
-                # FIX-#6: mid-session is review-first.  After 2.5h trading the
-                # day's direction is set and prices are extended; new entries
-                # here = chasing.  Surface the high bar in the prompt so the
-                # model self-rejects rather than relying solely on the gate.
-                "中盘新开仓政策: 原则上仅评估持仓不新入场。"
-                "如必须新开仓，须满足 C≥8 且 量比≥2.0×(实测数字)，"
-                "否则写 HOLD||0|中盘观望。\n\n"
-                + _CHECKLIST + "\n"
-                + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
-                + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
-                + _DEC
-                + "\nNEXT_ACTION: 收尾策略"
-                + provider_note)
+        system = (
+            "量化交易员 12:00ET 中盘复盘\n\n"
+            + _WATCHLIST_GUARD
+            + _COMMON
+            + "持仓评估: ▸ SYM|盈亏%|≈XR|止损=$X|建议\n\n"
+            # FIX-#6: mid-session is review-first.  After 2.5h trading the
+            # day's direction is set and prices are extended; new entries
+            # here = chasing.  Surface the high bar in the prompt so the
+            # model self-rejects rather than relying solely on the gate.
+            + "中盘新开仓政策: 原则上仅评估持仓不新入场。"
+              "如必须新开仓，须满足 C≥8 且 量比≥2.0×(实测数字)，"
+              "否则写 HOLD||0|中盘观望。\n\n"
+            + _CHECKLIST + "\n"
+            + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
+            + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
+            + _DEC
+            + "\nNEXT_ACTION: 收尾策略"
+            + provider_note
+        )
+        user = (f"账户: {portfolio}\n\n"
+                f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}")
+        return system, user
+
     if session == "closing":
-        return (f"量化交易员 15:30ET 收尾｜禁新开仓\n\n账户: {portfolio}\n\n"
-                f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}\n\n"
-                + _WATCHLIST_GUARD
-                + "过夜4条件: ①当日盈利 ②无重大宏观 ③无隔夜财报 ④Regime≠Chop\n\n"
-                "每仓: ▸ SYM|盈亏%|XR|决定:过夜/平仓|理由\n\n"
-                # FIX-5: format warning before DECISION so closing SELLs stay structured
-                + _FORMAT_WARN + "\n"
-                # FIX-3: 【必须输出】imperative mirrors _DEC treatment — closing had its
-                # own inline DECISION string which lacked the mandatory-output prefix.
-                # BUG-2: SELL must carry C:X/10 so confidence is logged.
-                "【必须输出，收尾禁止新开仓，无平仓写HOLD||0|原因】\n"
-                "DECISION:\nSELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n\n"
-                "NEXT_ACTION: 明日盘前重点"
-                + provider_note)
-    return ""
+        system = (
+            "量化交易员 15:30ET 收尾｜禁新开仓\n\n"
+            + _WATCHLIST_GUARD
+            + "过夜4条件: ①当日盈利 ②无重大宏观 ③无隔夜财报 ④Regime≠Chop\n\n"
+              "每仓: ▸ SYM|盈亏%|XR|决定:过夜/平仓|理由\n\n"
+            # FIX-5: format warning before DECISION so closing SELLs stay structured
+            + _FORMAT_WARN + "\n"
+            # FIX-3: 【必须输出】imperative mirrors _DEC treatment — closing had its
+            # own inline DECISION string which lacked the mandatory-output prefix.
+            # BUG-2: SELL must carry C:X/10 so confidence is logged.
+            + "【必须输出，收尾禁止新开仓，无平仓写HOLD||0|原因】\n"
+              "DECISION:\nSELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n\n"
+              "NEXT_ACTION: 明日盘前重点"
+            + provider_note
+        )
+        user = (f"账户: {portfolio}\n\n"
+                f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}")
+        return system, user
+
+    return "", ""
 
 
 # ─── Section 10: Trade Log Entry Builder (A05/A08) ───────────────

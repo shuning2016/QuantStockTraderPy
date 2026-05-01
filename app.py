@@ -657,14 +657,38 @@ def _api_post_with_retry(
     return r  # unreachable but satisfies type checkers
 
 
-def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
+def call_claude(prompt: str, max_tokens: int = MAX_TOKENS,
+                system_text: str = None) -> str:
+    """Call Claude API.
+
+    TOKEN-2 (revised): When `system_text` is provided it is sent as a cacheable
+    system message (static rules that are identical across retries within 5 min).
+    The user message carries only the dynamic market data — no cache_control,
+    so we don't pay the 1.25× cache-creation surcharge on every changing token.
+
+    When `system_text` is None (legacy callers, weekly feedback) the full
+    `prompt` is sent as a plain user message with no caching overhead.
+    """
     if not CLAUDE_KEY:
         return "[ERROR] CLAUDE_KEY not set"
     _ai_log = _logging.getLogger("quant.ai")
     try:
-        # TOKEN-2: enable prompt caching via content-block format + beta header.
-        # Marks the full prompt as cacheable (ephemeral = 5 min TTL).
-        # Cache hits are logged via usage.cache_read_input_tokens below.
+        if system_text:
+            # Split mode: static rules → cacheable system block; dynamic data → user.
+            payload = {
+                "model":      MODELS["claude"]["model"],
+                "max_tokens": max_tokens,
+                "system": [{"type": "text", "text": system_text,
+                            "cache_control": {"type": "ephemeral"}}],
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        else:
+            # Legacy / weekly-feedback mode: single user message, no caching.
+            payload = {
+                "model":      MODELS["claude"]["model"],
+                "max_tokens": max_tokens,
+                "messages":   [{"role": "user", "content": prompt}],
+            }
         r = _api_post_with_retry(
             MODELS["claude"]["api_url"],
             headers={
@@ -673,17 +697,10 @@ def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
                 "anthropic-beta":   "prompt-caching-2024-07-31",
                 "content-type":     "application/json",
             },
-            payload={
-                "model":      MODELS["claude"]["model"],
-                "max_tokens": max_tokens,
-                "messages":   [{"role": "user", "content": [
-                    {"type": "text", "text": prompt,
-                     "cache_control": {"type": "ephemeral"}},
-                ]}],
-            },
+            payload=payload,
             timeout=75,
             provider_name="Claude",
-            max_retries=1,
+            max_retries=2,
         )
         data = r.json()
         if not r.ok or not data.get("content"):
@@ -706,20 +723,25 @@ def call_claude(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
     except Exception as e:
         return f"[ERROR] Claude: {e}"
 
-def call_grok(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
+def call_grok(prompt: str, max_tokens: int = MAX_TOKENS,
+              system_text: str = None) -> str:
     if not GROK_KEY:
         return "[ERROR] GROK_KEY not set"
     _ai_log = _logging.getLogger("quant.ai")
     try:
+        messages = []
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+        messages.append({"role": "user", "content": prompt})
         r = _api_post_with_retry(
             MODELS["grok"]["api_url"],
             headers={"Authorization": f"Bearer {GROK_KEY}",
                      "Content-Type": "application/json"},
             payload={"model": MODELS["grok"]["model"], "max_tokens": max_tokens,
-                     "messages": [{"role": "user", "content": prompt}]},
+                     "messages": messages},
             timeout=60,
             provider_name="Grok",
-            max_retries=1,
+            max_retries=2,
         )
         data = r.json()
         if not r.ok or not data.get("choices"):
@@ -741,20 +763,25 @@ def call_grok(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
     except Exception as e:
         return f"[ERROR] Grok: {e}"
 
-def call_deepseek(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
+def call_deepseek(prompt: str, max_tokens: int = MAX_TOKENS,
+                  system_text: str = None) -> str:
     if not DEEPSEEK_KEY:
         return "[ERROR] DEEPSEEK_KEY not set"
     _ai_log = _logging.getLogger("quant.ai")
     try:
+        messages = []
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+        messages.append({"role": "user", "content": prompt})
         r = _api_post_with_retry(
             MODELS["deepseek"]["api_url"],
             headers={"Authorization": f"Bearer {DEEPSEEK_KEY}",
                      "Content-Type": "application/json"},
             payload={"model": MODELS["deepseek"]["model"], "max_tokens": max_tokens,
-                     "messages": [{"role": "user", "content": prompt}]},
+                     "messages": messages},
             timeout=60,
             provider_name="DeepSeek",
-            max_retries=1,
+            max_retries=2,
         )
         data = r.json()
         if not r.ok or not data.get("choices"):
@@ -776,10 +803,11 @@ def call_deepseek(prompt: str, max_tokens: int = MAX_TOKENS) -> str:
     except Exception as e:
         return f"[ERROR] DeepSeek: {e}"
 
-def call_ai(prompt: str, provider: str = "grok", max_tokens: int = MAX_TOKENS) -> str:
-    if provider == "claude":   return call_claude(prompt, max_tokens)
-    if provider == "deepseek": return call_deepseek(prompt, max_tokens)
-    return call_grok(prompt, max_tokens)
+def call_ai(prompt: str, provider: str = "grok", max_tokens: int = MAX_TOKENS,
+            system_text: str = None) -> str:
+    if provider == "claude":   return call_claude(prompt, max_tokens, system_text=system_text)
+    if provider == "deepseek": return call_deepseek(prompt, max_tokens, system_text=system_text)
+    return call_grok(prompt, max_tokens, system_text=system_text)
 
 # ─── Trade session runner ─────────────────────────────────────────
 
@@ -959,14 +987,14 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
         if saved:
             focus_note = f"\n\n📌 盘前分析重点: {saved}"
 
-    prompt = build_prompt_v6(session, portfolio_txt, watchlist_txt,
-                              news_txt, log_summary, focus_note,
-                              provider=provider)
+    system_txt, user_txt = build_prompt_v6(session, portfolio_txt, watchlist_txt,
+                                            news_txt, log_summary, focus_note,
+                                            provider=provider)
 
     # TOKEN-1: use session-specific output token cap to avoid over-spending on
     # sessions that need fewer tokens (premarket = analysis only, closing = SELLs).
     max_tokens = SESSION_MAX_TOKENS.get(session, MAX_TOKENS)
-    ai_text = call_ai(prompt, provider, max_tokens)
+    ai_text = call_ai(user_txt, provider, max_tokens, system_text=system_txt)
 
     # Parse regime from AI response and update state
     regime_str, spy_adx, spy_above = parse_regime_from_text(ai_text)
