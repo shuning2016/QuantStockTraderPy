@@ -692,7 +692,9 @@ function switchTab(n){
   }
   if(n==='messages'){
     const today=getNYDate();
-    document.getElementById('log-from').value=today.slice(0,7)+'-01';
+    const d30=new Date(new Date().setDate(new Date().getDate()-30));
+    const from30=d30.getFullYear()+'-'+String(d30.getMonth()+1).padStart(2,'0')+'-'+String(d30.getDate()).padStart(2,'0');
+    document.getElementById('log-from').value=from30;
     document.getElementById('log-to').value=today;
     switchLogTab('sessions');
     checkKvStatus();
