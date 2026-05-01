@@ -1498,6 +1498,57 @@ def cron_watchlist_suggestions():
         return jsonify({"ok": False, "error": str(e)}), 200
 
 
+@app.route("/api/storage-diag", methods=["GET"])
+def storage_diag():
+    """Show exactly what trade/session data exists in Redis so we can tell
+    whether historical records are present or were lost before Redis was set up."""
+    if not _USE_KV:
+        return jsonify({"ok": False, "message": "Redis not configured — data lives in /tmp only"})
+
+    # Scan the last 6 months of log keys for both trades and sessions
+    from datetime import date as _date
+    today_s = today_et()
+    summary = {}
+    ym = today_s[:7]
+    for _ in range(6):
+        for prefix in ("trades", "sessions"):
+            key = f"log:{prefix}:{ym}"
+            count = _kv(["LLEN", key])
+            if count:
+                summary[key] = int(count)
+        # decrement month
+        y, m = int(ym[:4]), int(ym[5:7])
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+        ym = f"{y:04d}-{m:02d}"
+
+    # Also check state keys
+    states = {}
+    for p in _VALID_PROVIDERS:
+        raw = _kv(["GET", f"tradestate:{p}"])
+        if raw:
+            try:
+                s = json.loads(raw)
+                states[p] = {
+                    "cash": s.get("cash"),
+                    "holdings": list(s.get("holdings", {}).keys()),
+                    "log_entries": len(s.get("log", [])),
+                }
+            except Exception:
+                states[p] = {"error": "parse failed"}
+        else:
+            states[p] = None
+
+    total_trades = sum(v for k, v in summary.items() if "trades" in k)
+    return jsonify({
+        "ok": True,
+        "total_trade_records_in_redis": total_trades,
+        "keys": summary,
+        "states": states,
+        "verdict": "Data exists in Redis" if total_trades > 0 else "No trade records found in Redis — data was likely stored in /tmp before Redis was configured",
+    })
+
 @app.route("/api/kv-status", methods=["GET"])
 def kv_status():
     """Check KV/Redis connectivity — used by the UI to warn if logs won't persist."""
