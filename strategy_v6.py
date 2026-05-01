@@ -796,8 +796,61 @@ def _parse_vol_ratio(reason: str) -> Optional[float]:
     return None
 
 
+# FIX-#4: hedge tokens that mean "I didn't actually look this up". When the
+# model writes any of these inside Vol:/Ratio: it has fabricated the volume
+# confirmation. The pre-existing _parse_vol_ratio happily extracted the
+# trailing digit (e.g. "预估≥2.0×" → 2.0) so the volume gate accepted a
+# made-up number. Catch the hedge words explicitly and block.
+_FAB_TOKENS = (
+    "预估", "待确认", "假设", "估计", "约", "≈", "未知", "未确认",
+    "TBD", "tbd", "N/A", "n/a", "?", "？",
+    "estimated", "approx", "assumed", "unknown",
+)
+
+def _field_segment(reason: str, field_name: str) -> Optional[str]:
+    """Return the text of one field from the pipe-delimited reason. Splits
+    on '+' / '|' / newline so adjacent fields don't bleed in."""
+    m = re.search(rf'{field_name}\s*[:=]\s*([^|+\n]*)', reason)
+    return m.group(1) if m else None
+
+def _is_field_fabricated(reason: str, field_name: str) -> bool:
+    """True if the named field's value contains a hedge token before/with
+    its number — i.e. the AI didn't measure it."""
+    seg = _field_segment(reason, field_name)
+    if seg is None:
+        return False
+    return any(tok in seg for tok in _FAB_TOKENS)
+
+
+def _parse_stop_price(reason: str) -> Optional[float]:
+    """Extract '止损=$X' as a float. Returns None if absent or unparseable."""
+    m = re.search(r'止损\s*[=:]\s*\$?\s*(\d+\.?\d*)', reason)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_atr_value(reason: str) -> Optional[float]:
+    """Extract 'ATR=$X' as a float (the raw ATR$, not the 1.5× stop distance)."""
+    m = re.search(r'ATR\s*[=:]\s*\$?\s*(\d+\.?\d*)', reason)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 # ─── Section 9: Prompt Builder (A03+A10) ─────────────────────────
 _COMMON = ("风控: 仓位=净值×1.5%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止损-2%|硬止盈+5%\n"
+           # FIX-#5: clarify the -2% is a CAP not a tightening rule. AI was
+           # tightening ATR-based stops to fit -2%, putting stops inside noise.
+           "风控扩展: 若1.5×ATR>2%(波动过大)→跳过该股写HOLD，禁止把止损调紧到-2%(噪音区会被扫损)\n"
+           # FIX-#7: mechanically prevent chase entries on already-extended movers.
+           "风控扩展: 单只持仓≤净值20%|当日已涨>5%标的不新入场，等待回调或次日入场\n"
            # BUG-3: trailing multipliers updated to 2.0/1.5 — prompt kept in sync
            "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-2.0ATR|盈≥2R→最高价-1.5ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
@@ -852,6 +905,13 @@ _FORMAT_WARN = (
     "❌ 错误(代码无法读取): DECISION: 由于NVDA突破关键阻力位，建议买入50股，设置止损...\n"
     "✅ 正确: BUY|NVDA|50|突破$XXX+C:7/10+ATR=$X+止损=$X(-2%)+目标=$X(+5%)+RR=2.5+Vol:Xm/20d:Ym/Ratio:1.8×|[SWING 2-5d]\n"
     "无操作时必须输出: HOLD||0|观望\n"
+    # FIX-#4: hedge words inside Vol:/Ratio: previously bypassed the parser's
+    # number-extraction gate (e.g. '预估≥2.0×' matched as 2.0). Code now
+    # rejects them outright; the prompt mirrors the rule so the AI self-rejects.
+    "Vol:/Ratio:字段必须是实测数字(如 Vol:52m/20d:38m/Ratio:1.4×)，"
+    "禁止写'预估/待确认/假设/估计/约/≈/TBD/N/A/?'。"
+    "若量能未确认 → 写 HOLD||0|量能未确认，不要BUY。\n"
+
 )
 
 
@@ -888,6 +948,13 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + _WATCHLIST_GUARD
                 + _COMMON
                 + "持仓评估: ▸ SYM|盈亏%|≈XR|止损=$X|建议\n\n"
+                # FIX-#6: mid-session is review-first.  After 2.5h trading the
+                # day's direction is set and prices are extended; new entries
+                # here = chasing.  Surface the high bar in the prompt so the
+                # model self-rejects rather than relying solely on the gate.
+                "中盘新开仓政策: 原则上仅评估持仓不新入场。"
+                "如必须新开仓，须满足 C≥8 且 量比≥2.0×(实测数字)，"
+                "否则写 HOLD||0|中盘观望。\n\n"
                 + _CHECKLIST + "\n"
                 + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
                 + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
@@ -1043,10 +1110,55 @@ def execute_decisions(decisions: list, state: dict, session: str,
             if rr is not None and rr < CFG.MIN_RR:
                 executed.append(f"⚠️ {sym} RR={rr:.2f}<{CFG.MIN_RR:.1f}最低要求，跳过"); continue
 
-            # D5/S5: volume ratio confirmation
+            # FIX-#4a: reject fabricated volume — when the model writes
+            # 预估/待确认/假设 in Vol: or Ratio: it didn't look up the real
+            # volume; the breakout signal is unverified.
+            if _is_field_fabricated(reason, "Ratio") or _is_field_fabricated(reason, "Vol"):
+                executed.append(
+                    f"⚠️ {sym} 量能字段含'预估/待确认/假设'等未实测词，"
+                    f"BUY必须使用实测数字(Ratio:X×)，拦截"); continue
+
+            # D5/S5 + FIX-#4b: volume ratio gate.  Pre-fix this only fired when
+            # vol_ratio was a number AND below threshold; if the ratio was
+            # absent (or only a hedge phrase) the BUY went through unchecked.
+            # New behaviour: BUY requires a parseable numeric ratio above
+            # VOLUME_MULT — no number, no trade.
             vol_ratio = _parse_vol_ratio(reason)
-            if vol_ratio is not None and vol_ratio < CFG.VOLUME_MULT:
+            if vol_ratio is None:
+                executed.append(
+                    f"⚠️ {sym} 量比缺失，BUY必须提供具体数字(Ratio:X×)，跳过"); continue
+            if vol_ratio < CFG.VOLUME_MULT:
                 executed.append(f"⚠️ {sym} 量比{vol_ratio:.1f}×<{CFG.VOLUME_MULT}×要求，跳过"); continue
+
+            # FIX-#5: stop-distance floor.  The strategy says "止损=Entry-1.5×ATR
+            # | 硬止损-2%" — the -2% is a *cap* meaning "if 1.5×ATR > 2%, the
+            # stock is too volatile, skip it", NOT "tighten the stop to 2%".
+            # Tighter-than-1.5×ATR stops sit inside normal noise and get
+            # whipsawed every time.  Reject any BUY whose stop is closer than
+            # 0.95×(1.5×ATR) to entry.  Tolerance covers rounding only.
+            stop_p = _parse_stop_price(reason)
+            atr_p  = _parse_atr_value(reason)
+            if stop_p is not None and atr_p is not None and price > 0 and stop_p > 0:
+                stop_dist = price - stop_p
+                min_dist  = atr_p * CFG.STOP_ATR_MULT
+                if 0 < stop_dist < min_dist * 0.95:
+                    executed.append(
+                        f"⚠️ {sym} 止损距离${stop_dist:.2f}<1.5×ATR=${min_dist:.2f}, "
+                        f"波动过大不适合本策略(请HOLD而非调紧止损)，跳过"); continue
+
+            # FIX-#6: mid-session is for position review, not chasing intraday
+            # movers.  After ~2.5 hours of trading the day's direction is set
+            # and prices have already moved; new entries here pay the FOMO
+            # premium.  Allow only with high conviction AND strong measured
+            # volume (mirrors closing's no-new-positions philosophy but with a
+            # disciplined escape hatch).
+            if session == "mid":
+                if conf < 8:
+                    executed.append(
+                        f"⚠️ {sym} 中盘新开仓需 C≥8 (当前C:{conf})，跳过"); continue
+                if vol_ratio < 2.0:
+                    executed.append(
+                        f"⚠️ {sym} 中盘新开仓需量比≥2.0× (当前{vol_ratio:.1f}×)，跳过"); continue
 
             atr    = atr_estimates.get(sym, price * 0.02)
             sizing = calc_position_size(calc_nav(state), price, atr, regime)
