@@ -237,10 +237,49 @@ def load_trade_state(provider: str) -> dict:
             try:
                 raw = json.loads(data)
                 if isinstance(raw, dict):
-                    return raw
+                    state = raw
+                    # Mirror filesystem mode: rebuild state.log from persistent
+                    # trade records if the in-memory log is empty (e.g. after a
+                    # Vercel cold-start that reset the state but left Redis intact).
+                    if not state.get("log"):
+                        today = today_et()
+                        month = today[:7] if today else ""
+                        trade_log = read_log_range(
+                            "trades",
+                            month + "-01" if month else "2020-01-01",
+                            today or "2099-12-31",
+                            provider,
+                        )
+                        if trade_log:
+                            for e in trade_log:
+                                e["_logged"] = True
+                            state["log"] = list(reversed(trade_log))
+                            _log_kv.info(
+                                "Rebuilt state.log for %s from %d KV trade records",
+                                provider, len(trade_log),
+                            )
+                    return state
             except Exception as e:
                 _log_kv.error("KV state parse error for %s: %s", provider, e)
-        return new_trade_state()
+        # State key missing — still try to rebuild log from persistent trades
+        state = new_trade_state()
+        today = today_et()
+        month = today[:7] if today else ""
+        trade_log = read_log_range(
+            "trades",
+            month + "-01" if month else "2020-01-01",
+            today or "2099-12-31",
+            provider,
+        )
+        if trade_log:
+            for e in trade_log:
+                e["_logged"] = True
+            state["log"] = list(reversed(trade_log))
+            _log_kv.info(
+                "Cold-start: rebuilt state.log for %s from %d KV trade records",
+                provider, len(trade_log),
+            )
+        return state
 
     # ── Filesystem fallback (local dev) ──
     f = _state_file(provider)
