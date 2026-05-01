@@ -419,7 +419,6 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="log-tab-row">
         <button class="log-tab-btn active" id="ltab-sessions" onclick="switchLogTab('sessions')">📊 全部记录</button>
         <button class="log-tab-btn"        id="ltab-trades"   onclick="switchLogTab('trades')">💹 交易记录</button>
-        <button class="log-tab-btn"        id="ltab-files"    onclick="switchLogTab('files')">📁 日志文件</button>
       </div>
       <div class="log-filter-row">
         <input type="date" id="log-from">
@@ -692,7 +691,7 @@ function switchTab(n){
   }
   if(n==='messages'){
     const today=getNYDate();
-    const d30=new Date(new Date().setDate(new Date().getDate()-30));
+    const d30=new Date(new Date().setDate(new Date().getDate()-7));
     const from30=d30.getFullYear()+'-'+String(d30.getMonth()+1).padStart(2,'0')+'-'+String(d30.getDate()).padStart(2,'0');
     document.getElementById('log-from').value=from30;
     document.getElementById('log-to').value=today;
@@ -1078,13 +1077,12 @@ function resetTrade(){
 // ═══════════════════════════════════════════════════════════════
 function switchLogTab(tab){
   _currentLogTab=tab;
-  ['sessions','trades','files'].forEach(t=>{const b=document.getElementById('ltab-'+t);if(b)b.className='log-tab-btn'+(t===tab?' active':'');});
+  ['sessions','trades'].forEach(t=>{const b=document.getElementById('ltab-'+t);if(b)b.className='log-tab-btn'+(t===tab?' active':'');});
   reloadLogTab();
 }
 async function reloadLogTab(){
   const el=document.getElementById('log-content');
   el.innerHTML='<div class="lcenter"><span class="sp dk"></span></div>';
-  if(_currentLogTab==='files'){await loadLogFiles();return;}
   const from=document.getElementById('log-from').value, to=document.getElementById('log-to').value, aiProv=document.getElementById('log-ai').value;
   try{
     const action=_currentLogTab==='sessions'?'getDriveSessions':'getDriveTrades';
@@ -1221,31 +1219,6 @@ function renderTradeLog(trades){
   }).join('');
 }
 
-async function loadLogFiles(){
-  const el=document.getElementById('log-content'), sumEl=document.getElementById('log-summary-inline');
-  try{
-    const files=await api('listDriveLogFiles')||[];
-    if(!files.length){el.innerHTML='<div class="empty-panel">logs/ 目录中暂无文件<br><span style="font-size:12px;color:var(--t3)">执行交易 session 后自动创建</span></div>';if(sumEl)sumEl.textContent='';return;}
-    if(sumEl)sumEl.innerHTML=`<span style="color:var(--t2)">${files.length}个文件</span>`;
-    el.innerHTML=`<div class="section-card">
-      <div style="font-size:12px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:12px">Python · logs/ 目录</div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        ${files.map(f=>{const isTr=f.name.includes('trades_'),isSe=f.name.includes('sessions_');const icon=isTr?'💹':isSe?'📊':'📄';const clr=isTr?'var(--blue)':isSe?'var(--purple)':'var(--t2)';const kb=(f.size/1024).toFixed(1);const mod=f.modified?new Date(f.modified).toLocaleDateString('zh-CN'):'';
-          return`<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg);border-radius:8px;font-size:13px">
-            <span style="font-size:16px">${icon}</span>
-            <span style="font-weight:600;color:${clr};flex:1">${esc(f.name)}</span>
-            <span style="font-size:11px;color:var(--t3)">${kb} KB</span>
-            <span style="font-size:11px;color:var(--t3)">${mod}</span>
-            <a href="/logs/${esc(f.name)}" download style="font-size:11px;color:var(--blue);text-decoration:none;padding:2px 8px;border:1px solid var(--blue);border-radius:4px">下载</a>
-          </div>`;}).join('')}
-      </div>
-      <div style="margin-top:14px;padding:10px 12px;background:var(--amber-l);border-radius:8px;font-size:12px;color:var(--t2);line-height:1.7">
-        💡 <strong>格式：</strong>JSON Lines（<code>.jsonl</code>）每行一条记录，可直接用 pandas 分析：<br>
-        <code>df = pd.read_json('logs/trades_2026-04.jsonl', lines=True)</code>
-      </div>
-    </div>`;
-  }catch(e){el.innerHTML=`<div class="empty-panel" style="color:var(--orange)">加载失败: ${esc(e.message)}</div>`;}
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  WEEKLY REVIEW — Feedback Loop & Watchlist Suggestions
@@ -1678,9 +1651,9 @@ function renderDailyReview(data){
 //  INIT
 // ═══════════════════════════════════════════════════════════════
 (async function init(){
-  // Set default log date range: last 30 days so recent trades are always visible
+  // Set default log date range: last 7 days so recent trades are always visible
   const today=getNYDate();
-  const d30=new Date(new Date().setDate(new Date().getDate()-30));
+  const d30=new Date(new Date().setDate(new Date().getDate()-7));
   const from30=d30.getFullYear()+'-'+String(d30.getMonth()+1).padStart(2,'0')+'-'+String(d30.getDate()).padStart(2,'0');
   document.getElementById('log-from').value=from30;
   document.getElementById('log-to').value=today;
