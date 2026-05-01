@@ -67,6 +67,65 @@ class CFG:
                                    # load and prevent truncated responses on mini models
 
 
+# ─── Per-provider behaviour overrides ─────────────────────────────
+# Recorded in improvement_plan_2026-05-01.md.  The three providers have
+# distinctly different empirical behaviour:
+#   - Grok    earns more profit but is slightly aggressive   → "let it cook"
+#   - Claude  reasons well but enters randomly + hedges      → "verify twice, size half"
+#   - DeepSeek is conservative and skips many setups         → "lower the bar to act"
+# Keys not present for a provider fall through to the CFG default.
+PROVIDER_OVERRIDES = {
+    "grok": {
+        "MAX_SINGLE_RATIO":       0.20,
+        "DAILY_LOSS_CIRCUIT_PCT": 3.0,
+        "TRAIL_1R_MULT":          1.0,   # tighter trail to lock the wins it earns
+        "TRAIL_2R_MULT":          1.0,
+        "SCALE_OUT_FRACTION":     0.50,
+        "MAX_HOLDINGS_PROVIDER":  5,
+        "SCORE_MIN_NORMAL":       6,
+        "SCORE_MIN_TRANSITION":   7,
+    },
+    "claude": {
+        "MAX_SINGLE_RATIO":       0.15,  # smaller positions — random entries cost less
+        "DAILY_LOSS_CIRCUIT_PCT": 2.0,   # tighter circuit breaker
+        "TRAIL_1R_MULT":          2.0,
+        "TRAIL_2R_MULT":          1.5,
+        "SCALE_OUT_FRACTION":     0.50,
+        "MAX_HOLDINGS_PROVIDER":  3,
+        "SCORE_MIN_NORMAL":       7,     # higher confidence floor
+        "SCORE_MIN_TRANSITION":   8,
+    },
+    "deepseek": {
+        "MAX_SINGLE_RATIO":       0.20,
+        "DAILY_LOSS_CIRCUIT_PCT": 3.0,
+        "TRAIL_1R_MULT":          2.0,
+        "TRAIL_2R_MULT":          1.5,
+        "SCALE_OUT_FRACTION":     0.66,  # rarely re-enters → take more off the table
+        "MAX_HOLDINGS_PROVIDER":  5,
+        "SCORE_MIN_NORMAL":       6,
+        "SCORE_MIN_TRANSITION":   6,     # accept C≥6 even in Transition (anti-miss)
+    },
+}
+
+# Account-wide and miscellaneous limits (not per-provider).
+ACCOUNT_MAX_OPEN_POSITIONS = 5     # B7: across all providers combined
+STALE_SIGNAL_DRIFT_PCT     = 1.0   # B8: AI-implied entry vs current price drift %
+STALE_SIGNAL_ATR_DRIFT_PCT = 10.0  # B8: AI's quoted ATR vs server ATR drift %
+
+# B5: low-conviction trades get smaller allocations even when the stop fits.
+CONFIDENCE_SIZE_MULT = {6: 0.75, 7: 1.00, 8: 1.25, 9: 1.25}
+
+
+def get_provider_cfg(provider: str, key: str, default=None):
+    """Look up a per-provider override, falling back to CFG class attr."""
+    overrides = PROVIDER_OVERRIDES.get((provider or "").lower(), {})
+    if key in overrides:
+        return overrides[key]
+    if hasattr(CFG, key):
+        return getattr(CFG, key)
+    return default
+
+
 def new_trade_state() -> dict:
     return {
         "cash": CFG.INITIAL_CASH,
@@ -127,16 +186,23 @@ def check_regime_allow_trade(state: dict) -> dict:
 
 
 # ─── Section 2: ATR Position Sizing (A04) ────────────────────────
-def calc_position_size(total_assets: float, price: float, atr: float, regime: str) -> dict:
+def calc_position_size(total_assets: float, price: float, atr: float, regime: str,
+                       provider: str = "", confidence: int = 7) -> dict:
+    """B4 + B5: per-provider single-position cap and confidence-tier sizing."""
     risk_amount    = total_assets * CFG.SINGLE_TRADE_RISK
     risk_per_share = atr * CFG.STOP_ATR_MULT
     if risk_per_share <= 0:
         risk_per_share = price * 0.02
     shares = math.floor(risk_amount / risk_per_share)
-    max_by_capital = math.floor((total_assets * CFG.MAX_SINGLE_RATIO) / price)
+    # B4: per-provider position cap (Claude=15%, others=20%)
+    max_ratio = get_provider_cfg(provider, "MAX_SINGLE_RATIO", CFG.MAX_SINGLE_RATIO)
+    max_by_capital = math.floor((total_assets * max_ratio) / price)
     shares = min(shares, max_by_capital)
     if regime == "Transition":
         shares = math.floor(shares * 0.5)
+    # B5: confidence-tier multiplier (C:6=0.75x, C:7=1.0x, C:8+=1.25x)
+    conf_mult = CONFIDENCE_SIZE_MULT.get(int(confidence) if confidence else 7, 1.0)
+    shares = math.floor(shares * conf_mult)
     shares = max(1, shares)
     return {
         "shares": shares,
@@ -175,7 +241,7 @@ def check_position_rules(state: dict, sym: str, shares: int, price: float) -> di
 
 
 # ─── Section 4: Trailing Stop / Auto Exits (A04) ─────────────────
-def check_auto_stop_rules(state: dict, session: str) -> list:
+def check_auto_stop_rules(state: dict, session: str, provider: str = "") -> list:
     sells = []
     _logger = None  # lazy-init only if needed to avoid import overhead
     for sym, h in state.get("holdings", {}).items():
@@ -200,11 +266,14 @@ def check_auto_stop_rules(state: dict, session: str) -> list:
         conf_h = h.get("confidence", 6)
         min_r_to_trail = CFG.TRAIL_MIN_R_HIGH if conf_h >= 8 else CFG.TRAIL_MIN_R_LOW
         new_stop = current_stop
+        # A2: per-provider trailing multiplier (Grok=1.0x tight, others=2.0/1.5)
+        trail_1r = get_provider_cfg(provider, "TRAIL_1R_MULT", CFG.TRAIL_1R_MULT)
+        trail_2r = get_provider_cfg(provider, "TRAIL_2R_MULT", CFG.TRAIL_2R_MULT)
         if unr >= min_r_to_trail:
             if unr >= 2:
-                new_stop = max(new_stop, h["highPrice"] - atr * CFG.TRAIL_2R_MULT)
+                new_stop = max(new_stop, h["highPrice"] - atr * trail_2r)
             elif unr >= 1:
-                new_stop = max(new_stop, h["highPrice"] - atr * CFG.TRAIL_1R_MULT)
+                new_stop = max(new_stop, h["highPrice"] - atr * trail_1r)
         if new_stop > h.get("stopPrice", float("-inf")):
             h["stopPrice"] = new_stop
 
@@ -213,6 +282,19 @@ def check_auto_stop_rules(state: dict, session: str) -> list:
             sells.append({"sym": sym, "shares": h["shares"],
                           "reason": f"追踪止损${h['stopPrice']:.2f}（{unr:+.2f}R）", "tag": tag})
             continue
+
+        # A1: scale-out 50% (or 66% for DeepSeek) at +1R, let runner trail
+        scale_frac = get_provider_cfg(provider, "SCALE_OUT_FRACTION", 0.50)
+        if (unr >= 1.0 and not h.get("partial_taken")
+                and h["shares"] >= 2 and scale_frac > 0):
+            sell_n = max(1, math.floor(h["shares"] * scale_frac))
+            sell_n = min(sell_n, h["shares"] - 1)  # keep ≥1 share for runner
+            if sell_n > 0:
+                sells.append({"sym": sym, "shares": sell_n,
+                    "reason": f"分批止盈+1R卖{int(scale_frac*100)}%留余仓",
+                    "tag": "SCALE_OUT_1R"})
+                h["partial_taken"] = state.get("_today", "1")
+                continue
 
         # Layer 3B: skip hard stop during the first 30 min after entry to avoid
         # being stopped out by normal open-session volatility on a fresh position.
@@ -915,10 +997,43 @@ _FORMAT_WARN = (
 )
 
 
+_DEC_DEEPSEEK_NOTE = (
+    # FIX-A3: DeepSeek-specific. Empirically DeepSeek over-issues bare HOLDs
+    # ("观望/等待") which produces synthetic_hold logs and zero participation.
+    # Force concrete reasoning + lower the psychological bar to act.
+    "\n[DeepSeek专项指引]\n"
+    "如选择HOLD，必须在原因中给出具体技术理由（例: '未突破$XX阻力' / "
+    "'量比0.8×<1.5×要求' / 'RR=1.6<2不达标'），不可仅写'观望/等待'。\n"
+    "若有合格信号(C≥6 + 量比≥1.5×实测 + RR≥2)请果断BUY，"
+    "保守是策略而非默认。错过比错买更常见。\n"
+)
+
+_DEC_CLAUDE_NOTE = (
+    # FIX-A7-Claude: Claude empirically hedges in narrative then BUYs anyway.
+    # Make the contradiction explicit so it self-rejects.
+    "\n[Claude专项指引]\n"
+    "若你在'风险提示'中写出'追涨/买在高点/谨慎/不建议'等任一字眼，"
+    "DECISION行必须为HOLD。禁止'风险提示警告 → 仍然BUY'的自相矛盾。\n"
+    "不要在Vol:/Ratio:字段写'预估/待确认/假设'，未实测请HOLD。\n"
+)
+
+
 def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                     news_summary: str, log_summary: str = "",
-                    focus_note: str = "") -> str:
-    """Build the session prompt.  All parameters are backward-compatible."""
+                    focus_note: str = "", provider: str = "") -> str:
+    """Build the session prompt.
+
+    `provider` is optional; when provided, a small per-provider note is
+    appended to address each model's known failure mode (see
+    PROVIDER_OVERRIDES / improvement_plan_2026-05-01.md).  Backward
+    compatible: callers that don't pass it get the legacy shared prompt.
+    """
+    provider_note = ""
+    p = (provider or "").lower()
+    if p == "deepseek":
+        provider_note = _DEC_DEEPSEEK_NOTE
+    elif p == "claude":
+        provider_note = _DEC_CLAUDE_NOTE
     if session == "premarket":
         return (f"量化交易员 9:15ET 盘前｜只分析不交易\n\n账户: {portfolio}\n\n"
                 f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}\n\n"
@@ -927,7 +1042,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + "Regime判断(A10): SPY ADX(14)→Trend(>25)/Transition(20-25)/Chop(<20)\n"
                 "Chop=禁新仓|Transition=置信度提至C:7+\n\n"
                 "输出:\n📊 Regime: [Trend/Transition/Chop] SPY:[简述]\n\n"
-                + _SCORE + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)")
+                + _SCORE + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)"
+                + provider_note)
     if session == "opening":
         # Note: "黄金入场" was renamed to "最佳入场时段" — the original Chinese label
         # caused AI models to interpret "黄金" as gold (the commodity) and recommend
@@ -941,7 +1057,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
                 + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
                 + _DEC
-                + "\nNEXT_ACTION: 下一步观察重点")
+                + "\nNEXT_ACTION: 下一步观察重点"
+                + provider_note)
     if session == "mid":
         return (f"量化交易员 12:00ET 中盘复盘\n\n账户: {portfolio}\n\n"
                 f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}\n\n"
@@ -959,7 +1076,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
                 + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
                 + _DEC
-                + "\nNEXT_ACTION: 收尾策略")
+                + "\nNEXT_ACTION: 收尾策略"
+                + provider_note)
     if session == "closing":
         return (f"量化交易员 15:30ET 收尾｜禁新开仓\n\n账户: {portfolio}\n\n"
                 f"今日交易:\n{log_summary}\n\n观察列表报价:\n{watchlist_text}\n\n"
@@ -973,7 +1091,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                 # BUG-2: SELL must carry C:X/10 so confidence is logged.
                 "【必须输出，收尾禁止新开仓，无平仓写HOLD||0|原因】\n"
                 "DECISION:\nSELL|SYM|N|理由|C:X/10\nHOLD||0|原因\n\n"
-                "NEXT_ACTION: 明日盘前重点")
+                "NEXT_ACTION: 明日盘前重点"
+                + provider_note)
     return ""
 
 
@@ -1021,18 +1140,20 @@ def build_trade_log_entry(action: str, trade_info: dict, state: dict, tag: str =
 
 # ─── Section 11: Execution Engine ────────────────────────────────
 def execute_decisions(decisions: list, state: dict, session: str,
-                      prices: dict, atr_estimates: dict) -> list:
+                      prices: dict, atr_estimates: dict,
+                      provider: str = "", account_ctx: dict = None) -> list:
     executed = []
     holdings = state.setdefault("holdings", {})
     log      = state.setdefault("log", [])
     today    = state.get("_today", "")
     today_trades = state.setdefault("todayTrades", {})
+    account_ctx = account_ctx or {}
 
     def tkey(sym):
         return f"{today}:{sym}"
 
-    # Auto stop/profit first
-    for s in check_auto_stop_rules(state, session):
+    # Auto stop/profit first (provider-aware: A1 scale-out, A2 trail mults)
+    for s in check_auto_stop_rules(state, session, provider=provider):
         sym = s["sym"]
         if sym not in holdings:
             continue
@@ -1097,13 +1218,45 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     f"AI未使用竖线格式，无法验证R:R/信号/ATR，不执行"
                 ); continue
             regime = state.get("currentRegime", "Trend")
-            min_conf = CFG.SCORE_MIN_TRANSITION if regime == "Transition" else CFG.SCORE_MIN_NORMAL
+            # A7: per-provider confidence floor (Claude=7/8, Grok=6/7, DeepSeek=6/6)
+            if regime == "Transition":
+                min_conf = get_provider_cfg(provider, "SCORE_MIN_TRANSITION", CFG.SCORE_MIN_TRANSITION)
+            else:
+                min_conf = get_provider_cfg(provider, "SCORE_MIN_NORMAL", CFG.SCORE_MIN_NORMAL)
             if conf < min_conf:
                 executed.append(f"⚠️ {sym} 置信度C:{conf}<{min_conf}，跳过"); continue
-            # S2/D3: 48-hour same-symbol cooldown
+
+            # B6: daily-loss circuit breaker — skip new BUYs after deep red day
+            circuit_pct = get_provider_cfg(provider, "DAILY_LOSS_CIRCUIT_PCT", 3.0)
+            day_pnl     = state.get("dailyPnL", {}).get(today, 0)
+            nav_now     = calc_nav(state)
+            if nav_now > 0 and (day_pnl / nav_now * 100) <= -circuit_pct:
+                executed.append(
+                    f"⚠️ {sym} 日内已亏{day_pnl/nav_now*100:.1f}%≤-{circuit_pct}%熔断，"
+                    f"暂停新开仓"); continue
+
+            # B7: account-wide max open positions across all providers
+            total_open = account_ctx.get("total_open_positions")
+            if (total_open is not None
+                    and total_open >= ACCOUNT_MAX_OPEN_POSITIONS
+                    and sym not in holdings):
+                executed.append(
+                    f"⚠️ {sym} 账户级总持仓{total_open}≥{ACCOUNT_MAX_OPEN_POSITIONS}上限，跳过"); continue
+
+            # S2/D3 + A5: cooldown — but allow profitable re-entry after 1 day if stop raised
             last_exit = state.get("cooldowns", {}).get(sym)
-            if last_exit and today and _business_days_since(last_exit, today) < CFG.COOLDOWN_DAYS:
-                executed.append(f"⚠️ {sym} 冷却期（上次出场:{last_exit}，需满{CFG.COOLDOWN_DAYS}交易日），跳过"); continue
+            if last_exit and today:
+                days_since = _business_days_since(last_exit, today)
+                if days_since < CFG.COOLDOWN_DAYS:
+                    # A5 escape hatch: previous exit was profitable AND ≥1 business day passed
+                    pew  = state.get("post_exit_watch", {}).get(sym, {})
+                    prev_pnl = pew.get("pnl_pct", 0)
+                    if days_since >= 1 and prev_pnl >= 1.0:
+                        executed.append(
+                            f"ℹ️ {sym} A5再入场: 上次出场盈利{prev_pnl:+.1f}%≥1%, "
+                            f"距今{days_since}日, 跳过冷却继续验证")
+                    else:
+                        executed.append(f"⚠️ {sym} 冷却期（上次出场:{last_exit}，需满{CFG.COOLDOWN_DAYS}交易日），跳过"); continue
 
             # S1/D2: minimum R:R gate
             rr = _parse_rr(reason)
@@ -1161,7 +1314,28 @@ def execute_decisions(decisions: list, state: dict, session: str,
                         f"⚠️ {sym} 中盘新开仓需量比≥2.0× (当前{vol_ratio:.1f}×)，跳过"); continue
 
             atr    = atr_estimates.get(sym, price * 0.02)
-            sizing = calc_position_size(calc_nav(state), price, atr, regime)
+
+            # B8: stale-signal kill — AI's quoted ATR or implied entry far from current
+            atr_p_b8 = _parse_atr_value(reason)
+            if atr_p_b8 is not None and atr > 0:
+                atr_drift_pct = abs(atr_p_b8 - atr) / atr * 100
+                if atr_drift_pct > STALE_SIGNAL_ATR_DRIFT_PCT:
+                    executed.append(
+                        f"⚠️ {sym} 信号过期: AI报ATR={atr_p_b8:.3f} vs 实时ATR={atr:.3f} "
+                        f"偏差{atr_drift_pct:.1f}%>{STALE_SIGNAL_ATR_DRIFT_PCT}%, 跳过"); continue
+            stop_p_b8 = _parse_stop_price(reason)
+            if stop_p_b8 is not None and atr_p_b8 is not None and price > 0:
+                # implied entry where AI saw the setup = stop + 1.5×ATR
+                implied_entry = stop_p_b8 + atr_p_b8 * CFG.STOP_ATR_MULT
+                if implied_entry > 0:
+                    drift_pct = abs(price - implied_entry) / implied_entry * 100
+                    if drift_pct > STALE_SIGNAL_DRIFT_PCT:
+                        executed.append(
+                            f"⚠️ {sym} 信号过期: AI隐含入场${implied_entry:.2f} vs "
+                            f"现价${price:.2f} 偏差{drift_pct:.1f}%>{STALE_SIGNAL_DRIFT_PCT}%, 跳过"); continue
+
+            sizing = calc_position_size(calc_nav(state), price, atr, regime,
+                                        provider=provider, confidence=conf)
             shares = min(shares, sizing["shares"]) if shares > 0 else sizing["shares"]
 
             # D4: cap position size when ATR stop exceeds confidence-tier limit
@@ -1179,7 +1353,7 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     capped_risk = price * max_stp / 100
                     nav = calc_nav(state)
                     capped = max(1, math.floor((nav * CFG.SINGLE_TRADE_RISK) / capped_risk))
-                    capped = min(capped, math.floor((nav * CFG.MAX_SINGLE_RATIO) / price))
+                    capped = min(capped, math.floor((nav * get_provider_cfg(provider, "MAX_SINGLE_RATIO", CFG.MAX_SINGLE_RATIO)) / price))
                     shares = min(shares, capped)
                     d4_note = (f" [D4:止损{actual_stop_pct:.1f}%>{max_stp}%→调整至{shares}股]")
 

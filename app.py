@@ -960,7 +960,8 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
             focus_note = f"\n\n📌 盘前分析重点: {saved}"
 
     prompt = build_prompt_v6(session, portfolio_txt, watchlist_txt,
-                              news_txt, log_summary, focus_note)
+                              news_txt, log_summary, focus_note,
+                              provider=provider)
 
     # TOKEN-1: use session-specific output token cap to avoid over-spending on
     # sessions that need fewer tokens (premarket = analysis only, closing = SELLs).
@@ -1066,7 +1067,22 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                      list(state["holdings"].keys()),
                      state.get("currentRegime", "?"))
 
-        executed = execute_decisions(decisions, state, session, prices, atr_est)
+        # B7: account-wide open-position count across all three providers
+        try:
+            total_open = 0
+            for _p in _VALID_PROVIDERS:
+                if _p == provider:
+                    total_open += len(state.get("holdings", {}))
+                else:
+                    _other = load_trade_state(_p)
+                    total_open += len(_other.get("holdings", {}))
+            account_ctx = {"total_open_positions": total_open}
+        except Exception as _e:
+            _logger.warning("[%s/%s] account_ctx build failed: %s", provider, session, _e)
+            account_ctx = {}
+
+        executed = execute_decisions(decisions, state, session, prices, atr_est,
+                                     provider=provider, account_ctx=account_ctx)
 
         _logger.info("[%s/%s] ── EXECUTION RESULTS (%d) ──────────────────",
                      provider, session, len(executed))
