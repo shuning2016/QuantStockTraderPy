@@ -1032,8 +1032,20 @@ async function manualSession(session){
     if(result&&result.error)throw new Error(result.error);
     if(result&&result.state){
       const lp=(tradeState&&tradeState.lastPrices)||{};
-      tradeState=result.state; tradeState.lastPrices=Object.assign({},result.state.lastPrices||{},lp);
-      saveTradeStateLocal(ai);
+      const s=result.state;
+      // Same guard as syncFromBackend: never wipe a live local state with an
+      // empty backend state (can happen when Vercel cold-start clears /tmp and
+      // the session returns a freshly-initialised state with no log).
+      const serverEmpty=(s.cash===10000&&!Object.keys(s.holdings||{}).length&&!(s.log||[]).length);
+      const localHasData=tradeState&&((tradeState.log||[]).length>0||Object.keys(tradeState.holdings||{}).length>0);
+      if(serverEmpty&&localHasData){
+        // Push the surviving local state back to the backend so subsequent
+        // cron sessions see the real holdings and log.
+        api('saveStateToBackend',{provider:ai,state:tradeState}).catch(()=>{});
+      } else {
+        tradeState=s; tradeState.lastPrices=Object.assign({},s.lastPrices||{},lp);
+        saveTradeStateLocal(ai);
+      }
     }
     const cnt=result&&result.executed?result.executed.filter(e=>e.startsWith('✅')).length:0;
     toast(`${labels[session]} 完成${cnt?'，'+cnt+'笔成交':'，无成交'} ✓`,'ok');
