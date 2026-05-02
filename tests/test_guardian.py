@@ -93,6 +93,8 @@ def test_check_guardian_exits_detects_stop_loss():
 
 
 def test_check_guardian_exits_detects_take_profit():
+    # shares=1 bypasses SCALE_OUT_1R (requires shares >= 2), letting
+    # execution reach the HARD_PROFIT check at +5%.
     state = _make_state_with_holding("AAPL", avg_cost=100.0, stop_price=97.0, shares=1)
     prices = {"AAPL": 106.0}  # above HARD_PROFIT_PCT=5%
 

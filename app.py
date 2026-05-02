@@ -605,7 +605,7 @@ def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
     sells = check_auto_stop_rules(state, "guardian", provider=provider)
 
     STOP_TAGS   = {"STOP_LOSS", "TRAIL_STOP_PROFIT", "HARD_STOP"}
-    PROFIT_TAGS = {"HARD_PROFIT"}
+    PROFIT_TAGS = {"HARD_PROFIT", "SCALE_OUT_1R"}
 
     return {
         "stop_losses":  [s for s in sells if s.get("tag") in STOP_TAGS],
