@@ -1616,7 +1616,7 @@ def cron_guardian():
                     stop_p      = holding.get("stopPrice", float("inf"))
                     avg_cost    = holding["avgCost"]
                     risk_per    = holding.get("riskPerShare", avg_cost * 0.02)
-                    pnl_pct     = (conf_price - avg_cost) / avg_cost * 100
+                    pnl_pct     = (conf_price - avg_cost) / avg_cost * 100 if avg_cost > 0 else 0
                     hard_stop   = max(S.CFG.HARD_STOP_PCT,
                                       risk_per / avg_cost * 100 if avg_cost > 0
                                       else S.CFG.HARD_STOP_PCT)
