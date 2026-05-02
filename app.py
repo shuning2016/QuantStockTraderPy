@@ -1500,6 +1500,168 @@ def cron_run(session, provider):
                         "error": str(e)}), 200
 
 
+_GUARDIAN_LOCK_KEY = "guardian_lock"
+_GUARDIAN_LOCK_TTL = 90  # seconds: covers 30s confirmation + execution headroom
+
+
+@app.route("/api/cron/guardian", methods=["GET"])
+def cron_guardian():
+    """Guardian cron: intra-session stop-loss and take-profit enforcement.
+
+    Triggered by cron-job.org (not Vercel cron — every-5-min frequency
+    exceeds the Hobby plan's once-per-day limit).
+
+    Schedule on cron-job.org:
+      Job 1 — market hours:  */5 13-20 * * 1-5  (UTC)
+      Job 2 — off-hours:     0 * * * *
+    Both jobs call: GET https://<app>.vercel.app/api/cron/guardian
+    with header:    Authorization: Bearer <CRON_SECRET>
+    """
+    if not _verify_cron(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    log = _logging.getLogger("quant.guardian")
+
+    # Acquire guardian lock (atomic SET NX) — skip if a prior run is mid-flight
+    if _USE_KV:
+        token  = f"{int(time.time() * 1000)}-{os.getpid()}"
+        result = _kv(["SET", _GUARDIAN_LOCK_KEY, token, "NX", "EX",
+                       str(_GUARDIAN_LOCK_TTL)])
+        if result != "OK":
+            log.info("Guardian skipped — lock held (prior run still active)")
+            return jsonify({"ok": True, "status": "skipped",
+                            "reason": "guardian lock held"}), 200
+
+    try:
+        # Skip if any trading session is currently running — avoids race where
+        # both guardian and a session attempt to sell the same holding.
+        for p in _VALID_PROVIDERS:
+            for s in _VALID_SESSIONS:
+                if _USE_KV and _kv(["GET", f"session_lock:{p}:{s}"]):
+                    log.info("Guardian skipped — session lock held: %s/%s", p, s)
+                    return jsonify({"ok": True, "status": "skipped",
+                                    "reason": f"session lock: {p}/{s}"}), 200
+
+        today   = today_et()
+        now_et  = datetime.now(_ET).strftime("%H:%M")
+
+        # Load all three providers' states
+        states = {p: load_trade_state(p) for p in _VALID_PROVIDERS}
+
+        # Collect unique symbols currently held across all providers
+        all_symbols = list({
+            sym
+            for state in states.values()
+            for sym in state.get("holdings", {})
+        })
+
+        if not all_symbols:
+            log.info("Guardian: no holdings to check")
+            return jsonify({"ok": True, "status": "no_holdings", "checked": 0}), 200
+
+        # Batch-fetch prices (20/batch, 1s gap → ≤20 calls/sec, safe under 30/sec)
+        prices = _batch_fetch_prices(all_symbols)
+        log.info("Guardian: fetched %d/%d prices for %s",
+                 len(prices), len(all_symbols), all_symbols)
+
+        # First pass: detect exits per provider
+        suspected_stops  = {}   # {provider: [sell_dict, ...]}
+        take_profit_hits = {}   # {provider: [sell_dict, ...]}
+
+        for provider, state in states.items():
+            if not state.get("holdings"):
+                continue
+            exits = _check_guardian_exits(state, prices, provider)
+            if exits["stop_losses"]:
+                suspected_stops[provider]  = exits["stop_losses"]
+            if exits["take_profits"]:
+                take_profit_hits[provider] = exits["take_profits"]
+
+        # Execute take-profits immediately — 5% gain is not a wick
+        profit_executed = []
+        for provider, sells in take_profit_hits.items():
+            state = states[provider]
+            for sell in sells:
+                sym   = sell["sym"]
+                price = prices.get(sym, 0)
+                if price <= 0 or sym not in state.get("holdings", {}):
+                    continue
+                _execute_guardian_sell(state, sell, price, today, now_et)
+                profit_executed.append(f"{provider}/{sym}")
+                log.info("Guardian PROFIT: %s/%s @$%.2f tag=%s",
+                         provider, sym, price, sell.get("tag"))
+
+        # Confirm stop-losses: sleep 30s, re-fetch, verify breach persists
+        stop_executed = []
+        if suspected_stops:
+            stop_syms = list({
+                s["sym"]
+                for sells in suspected_stops.values()
+                for s in sells
+            })
+            log.info("Guardian: suspected stop breach on %s — confirming in 30s",
+                     stop_syms)
+            time.sleep(30)
+            confirm_prices = _batch_fetch_prices(stop_syms)
+
+            for provider, sells in suspected_stops.items():
+                state = states[provider]
+                for sell in sells:
+                    sym        = sell["sym"]
+                    conf_price = confirm_prices.get(sym, 0)
+                    holding    = state.get("holdings", {}).get(sym)
+                    if not holding or conf_price <= 0:
+                        continue
+
+                    stop_p      = holding.get("stopPrice", float("inf"))
+                    avg_cost    = holding["avgCost"]
+                    risk_per    = holding.get("riskPerShare", avg_cost * 0.02)
+                    pnl_pct     = (conf_price - avg_cost) / avg_cost * 100
+                    hard_stop   = max(S.CFG.HARD_STOP_PCT,
+                                      risk_per / avg_cost * 100 if avg_cost > 0
+                                      else S.CFG.HARD_STOP_PCT)
+
+                    still_breached = (conf_price <= stop_p or pnl_pct <= -hard_stop)
+
+                    if still_breached:
+                        _execute_guardian_sell(state, sell, conf_price, today, now_et)
+                        stop_executed.append(f"{provider}/{sym}")
+                        log.info("Guardian STOP confirmed: %s/%s @$%.2f",
+                                 provider, sym, conf_price)
+                    else:
+                        log.info("Guardian STOP wick filtered: %s/%s recovered $%.2f",
+                                 provider, sym, conf_price)
+
+        # Persist updated states and write guardian trades to persistent log
+        changed_providers = {p.split("/")[0] for p in profit_executed + stop_executed}
+        for provider in changed_providers:
+            save_trade_state(provider, states[provider])
+            for entry in states[provider].get("log", []):
+                if (entry.get("session") == "guardian"
+                        and entry.get("date") == today
+                        and not entry.get("_logged")):
+                    append_log("trades", entry, today)
+                    entry["_logged"] = True
+
+        log.info("Guardian complete: checked=%d stop=%s profit=%s",
+                 len(all_symbols), stop_executed, profit_executed)
+        return jsonify({
+            "ok":             True,
+            "status":         "checked",
+            "checked":        len(all_symbols),
+            "prices_fetched": len(prices),
+            "stop_executed":  stop_executed,
+            "profit_executed": profit_executed,
+        }), 200
+
+    except Exception as e:
+        log.error("Guardian error: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 200
+    finally:
+        if _USE_KV:
+            _kv(["DEL", _GUARDIAN_LOCK_KEY])
+
+
 @app.route("/api/cron/status", methods=["GET"])
 def cron_status():
     """
