@@ -49,3 +49,12 @@ def test_batch_fetch_prices_no_sleep_for_single_batch(monkeypatch):
     app._batch_fetch_prices(["AAPL", "MSFT"])
 
     assert len(sleep_calls) == 0
+
+
+def test_batch_fetch_prices_handles_none_quote(monkeypatch):
+    monkeypatch.setattr(app, "get_stock_quote", lambda sym: None)
+    monkeypatch.setattr(app.time, "sleep", lambda x: None)
+
+    result = app._batch_fetch_prices(["AAPL"])
+
+    assert result == {}

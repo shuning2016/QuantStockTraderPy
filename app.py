@@ -566,6 +566,7 @@ def get_single_quote(sym: str, asset_type: str) -> dict:
     except Exception:
         return None
 
+
 def _batch_fetch_prices(symbols: list, batch_size: int = 20) -> dict:
     """Fetch current prices for all symbols in batches.
 
@@ -579,7 +580,7 @@ def _batch_fetch_prices(symbols: list, batch_size: int = 20) -> dict:
         batch = symbols[i : i + batch_size]
         for sym in batch:
             q = get_stock_quote(sym)
-            if q.get("c", 0) > 0:
+            if q and q.get("c", 0) > 0:
                 prices[sym] = q["c"]
         if i + batch_size < len(symbols):
             time.sleep(1.0)
