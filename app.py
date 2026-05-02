@@ -33,6 +33,7 @@ from strategy_v6 import (
     build_prompt_v6, parse_ai_decisions, parse_confidence_score,
     parse_regime_from_text, parse_atr_from_text,
     execute_decisions, check_operating_rules, get_market_regime,
+    check_auto_stop_rules,
 )
 from weekly_review import (
     most_recent_week,
@@ -585,6 +586,31 @@ def _batch_fetch_prices(symbols: list, batch_size: int = 20) -> dict:
         if i + batch_size < len(symbols):
             time.sleep(1.0)
     return prices
+
+
+def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
+    """Detect stop-loss and take-profit breaches for one provider's holdings.
+
+    Calls check_auto_stop_rules with the freshly fetched prices and splits
+    results by urgency:
+      stop_losses  — need 30-second confirmation before executing
+      take_profits — execute immediately (5% gain is not a wick)
+
+    Side-effects: updates highPrice and stopPrice on holdings in state
+    (legitimate tracking mutations, same as a normal session would do).
+    """
+    state["lastPrices"] = prices
+    state["_nowET"] = datetime.now(_ET).strftime("%H:%M")
+
+    sells = check_auto_stop_rules(state, "guardian", provider=provider)
+
+    STOP_TAGS   = {"STOP_LOSS", "TRAIL_STOP_PROFIT", "HARD_STOP"}
+    PROFIT_TAGS = {"HARD_PROFIT"}
+
+    return {
+        "stop_losses":  [s for s in sells if s.get("tag") in STOP_TAGS],
+        "take_profits": [s for s in sells if s.get("tag") in PROFIT_TAGS],
+    }
 
 # ─── News feed ────────────────────────────────────────────────────
 _news_cache = {}

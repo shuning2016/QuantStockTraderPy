@@ -58,3 +58,76 @@ def test_batch_fetch_prices_handles_none_quote(monkeypatch):
     result = app._batch_fetch_prices(["AAPL"])
 
     assert result == {}
+
+
+def _make_holding(avg_cost=100.0, stop_price=97.0, shares=10,
+                  confidence=7, entry_time="09:35"):
+    return {
+        "shares":       shares,
+        "avgCost":      avg_cost,
+        "stopPrice":    stop_price,
+        "highPrice":    avg_cost,
+        "entryAtr":     2.0,
+        "riskPerShare": avg_cost - stop_price,
+        "confidence":   confidence,
+        "entryTime":    entry_time,
+    }
+
+
+def _make_state_with_holding(sym="AAPL", avg_cost=100.0, stop_price=97.0, shares=10):
+    state = S.new_trade_state()
+    state["holdings"][sym] = _make_holding(avg_cost=avg_cost, stop_price=stop_price, shares=shares)
+    state["currentRegime"]  = "Trend"
+    return state
+
+
+def test_check_guardian_exits_detects_stop_loss():
+    state = _make_state_with_holding("AAPL", avg_cost=100.0, stop_price=97.0)
+    prices = {"AAPL": 96.0}  # below stopPrice
+
+    result = app._check_guardian_exits(state, prices, "grok")
+
+    assert len(result["stop_losses"]) == 1
+    assert result["stop_losses"][0]["sym"] == "AAPL"
+    assert len(result["take_profits"]) == 0
+
+
+def test_check_guardian_exits_detects_take_profit():
+    state = _make_state_with_holding("AAPL", avg_cost=100.0, stop_price=97.0, shares=1)
+    prices = {"AAPL": 106.0}  # above HARD_PROFIT_PCT=5%
+
+    result = app._check_guardian_exits(state, prices, "grok")
+
+    assert len(result["take_profits"]) == 1
+    assert result["take_profits"][0]["sym"] == "AAPL"
+    assert len(result["stop_losses"]) == 0
+
+
+def test_check_guardian_exits_no_breach():
+    state = _make_state_with_holding("AAPL", avg_cost=100.0, stop_price=97.0)
+    prices = {"AAPL": 101.0}  # between stop and profit
+
+    result = app._check_guardian_exits(state, prices, "grok")
+
+    assert result["stop_losses"] == []
+    assert result["take_profits"] == []
+
+
+def test_check_guardian_exits_updates_high_price():
+    state = _make_state_with_holding("AAPL", avg_cost=100.0, stop_price=97.0)
+    state["holdings"]["AAPL"]["highPrice"] = 100.0
+    prices = {"AAPL": 103.0}
+
+    app._check_guardian_exits(state, prices, "grok")
+
+    assert state["holdings"]["AAPL"]["highPrice"] == 103.0
+
+
+def test_check_guardian_exits_skips_missing_price():
+    state = _make_state_with_holding("AAPL", avg_cost=100.0, stop_price=97.0)
+    prices = {}  # no price for AAPL
+
+    result = app._check_guardian_exits(state, prices, "grok")
+
+    assert result["stop_losses"] == []
+    assert result["take_profits"] == []
