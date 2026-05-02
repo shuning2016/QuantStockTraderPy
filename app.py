@@ -648,6 +648,8 @@ def _execute_guardian_sell(state: dict, sell: dict, price: float,
 
     state.setdefault("log", []).append(entry)
     state["cash"] = state.get("cash", 0.0) + price * shares * (1 - CFG.EXEC_SLIPPAGE)
+    # Intentionally not incrementing todayTrades — guardian exits are system-triggered,
+    # not discretionary. Cooldown already prevents same-day re-entry for the symbol.
     state.setdefault("dailyPnL", {})[today] = (
         state["dailyPnL"].get(today, 0) + real
     )

@@ -207,3 +207,30 @@ def test_execute_guardian_sell_partial_reduces_shares():
                                today="2026-05-02", now_et="11:00")
 
     assert state["holdings"]["AAPL"]["shares"] == 5
+
+
+def test_execute_guardian_sell_updates_state_fields():
+    state = _make_state_for_sell()
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    assert state["dailyPnL"]["2026-05-02"] == pytest.approx((96.5 - 100.0) * 10, rel=1e-6)
+    assert state["cooldowns"]["AAPL"] == "2026-05-02"
+    assert state["post_exit_watch"]["AAPL"]["exit_price"] == 96.5
+    assert state["post_exit_watch"]["AAPL"]["exit_date"] == "2026-05-02"
+    assert state["post_exit_watch"]["AAPL"]["avg_cost"] == 100.0
+    assert state["post_exit_watch"]["AAPL"]["pnl_pct"] == pytest.approx(-3.5, rel=1e-4)
+    assert "log_id" in state["post_exit_watch"]["AAPL"]
+
+
+def test_execute_guardian_sell_zero_avg_cost_safe():
+    state = _make_state_for_sell()
+    state["holdings"]["AAPL"]["avgCost"] = 0.0
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$0.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=5.0,
+                               today="2026-05-02", now_et="11:00")
+
+    assert state["post_exit_watch"]["AAPL"]["pnl_pct"] == 0
