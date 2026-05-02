@@ -598,6 +598,7 @@ def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
 
     Side-effects: updates highPrice and stopPrice on holdings in state
     (legitimate tracking mutations, same as a normal session would do).
+    Also sets partial_taken on a holding when SCALE_OUT_1R fires.
     """
     state["lastPrices"] = prices
     state["_nowET"] = datetime.now(_ET).strftime("%H:%M")
@@ -1617,9 +1618,9 @@ def cron_guardian():
                     avg_cost    = holding["avgCost"]
                     risk_per    = holding.get("riskPerShare", avg_cost * 0.02)
                     pnl_pct     = (conf_price - avg_cost) / avg_cost * 100 if avg_cost > 0 else 0
-                    hard_stop   = max(S.CFG.HARD_STOP_PCT,
+                    hard_stop   = max(CFG.HARD_STOP_PCT,
                                       risk_per / avg_cost * 100 if avg_cost > 0
-                                      else S.CFG.HARD_STOP_PCT)
+                                      else CFG.HARD_STOP_PCT)
 
                     still_breached = (conf_price <= stop_p or pnl_pct <= -hard_stop)
 
