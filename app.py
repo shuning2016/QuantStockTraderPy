@@ -607,6 +607,12 @@ def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
 
     STOP_TAGS   = {"STOP_LOSS", "TRAIL_STOP_PROFIT", "HARD_STOP"}
     PROFIT_TAGS = {"HARD_PROFIT", "SCALE_OUT_1R"}
+    KNOWN_TAGS  = STOP_TAGS | PROFIT_TAGS | {"REGIME_EXIT"}
+
+    for s in sells:
+        if s.get("tag") not in KNOWN_TAGS:
+            log.warning("Guardian: unrecognised sell tag %r for %s — skipping",
+                        s.get("tag"), s.get("sym"))
 
     return {
         "stop_losses":  [s for s in sells if s.get("tag") in STOP_TAGS],
@@ -1625,6 +1631,9 @@ def cron_guardian():
                     still_breached = (conf_price <= stop_p or pnl_pct <= -hard_stop)
 
                     if still_breached:
+                        # Clamp shares in case a take-profit partial executed first
+                        sell = dict(sell)
+                        sell["shares"] = min(sell["shares"], holding["shares"])
                         _execute_guardian_sell(state, sell, conf_price, today, now_et)
                         stop_executed.append(f"{provider}/{sym}")
                         log.info("Guardian STOP confirmed: %s/%s @$%.2f",

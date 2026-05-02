@@ -234,3 +234,36 @@ def test_execute_guardian_sell_zero_avg_cost_safe():
                                today="2026-05-02", now_et="11:00")
 
     assert state["post_exit_watch"]["AAPL"]["pnl_pct"] == 0
+
+
+def test_execute_guardian_sell_does_not_increment_today_trades():
+    """Guardian exits are system-triggered; todayTrades must not change."""
+    state = _make_state_for_sell()
+    state["todayTrades"] = 2
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    assert state["todayTrades"] == 2
+
+
+def test_execute_guardian_sell_clamped_shares_on_partial():
+    """If a take-profit partial already executed, sell should not exceed remaining shares."""
+    state = _make_state_for_sell()
+    # 5 shares remain after a prior take-profit partial
+    state["holdings"]["AAPL"]["shares"] = 5
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    # simulate the clamp that the endpoint does before calling _execute_guardian_sell
+    sell = dict(sell)
+    sell["shares"] = min(sell["shares"], state["holdings"]["AAPL"]["shares"])
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    # holding must be fully removed (5 remaining were all sold)
+    assert "AAPL" not in state["holdings"]
+    # cash must reflect only 5 shares, not 10
+    expected_cash = 10_000.0 + 96.5 * 5 * (1 - S.CFG.EXEC_SLIPPAGE)
+    assert state["cash"] == pytest.approx(expected_cash, rel=1e-6)
