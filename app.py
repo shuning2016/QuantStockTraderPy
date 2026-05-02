@@ -33,7 +33,7 @@ from strategy_v6 import (
     build_prompt_v6, parse_ai_decisions, parse_confidence_score,
     parse_regime_from_text, parse_atr_from_text,
     execute_decisions, check_operating_rules, get_market_regime,
-    check_auto_stop_rules,
+    check_auto_stop_rules, build_trade_log_entry,
 )
 from weekly_review import (
     most_recent_week,
@@ -610,6 +610,60 @@ def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
     return {
         "stop_losses":  [s for s in sells if s.get("tag") in STOP_TAGS],
         "take_profits": [s for s in sells if s.get("tag") in PROFIT_TAGS],
+    }
+
+
+def _execute_guardian_sell(state: dict, sell: dict, price: float,
+                           today: str, now_et: str) -> None:
+    """Execute one guardian-triggered sell. Mutates state in place.
+
+    Reuses the same state-mutation pattern as execute_decisions so guardian
+    sells appear in trade logs, dailyPnL, cooldowns, and post_exit_watch
+    identically to session-triggered sells.  Tag is prefixed with GUARDIAN_
+    so guardian exits are distinguishable in the UI and A07 feedback loop.
+    """
+    sym      = sell["sym"]
+    holdings = state.setdefault("holdings", {})
+    if sym not in holdings:
+        return
+
+    h        = holdings[sym]
+    avg_cost = h["avgCost"]
+    shares   = sell["shares"]
+    real     = (price - avg_cost) * shares
+    tag      = "GUARDIAN_" + sell.get("tag", "STOP")
+
+    state["_today"] = today
+    state["_nowET"] = now_et
+
+    entry = build_trade_log_entry("sell", {
+        "sym":         sym,
+        "shares":      shares,
+        "price":       price,
+        "realizedPnl": real,
+        "reason":      sell["reason"],
+        "session":     "guardian",
+        "confidence":  h.get("confidence", 0),
+    }, state, tag)
+
+    state.setdefault("log", []).append(entry)
+    state["cash"] = state.get("cash", 0.0) + price * shares * (1 - CFG.EXEC_SLIPPAGE)
+    state.setdefault("dailyPnL", {})[today] = (
+        state["dailyPnL"].get(today, 0) + real
+    )
+
+    if shares >= h["shares"]:
+        del holdings[sym]
+    else:
+        h["shares"] -= shares
+
+    state.setdefault("cooldowns", {})[sym]       = today
+    state.setdefault("post_exit_watch", {})[sym] = {
+        "exit_price": price,
+        "exit_date":  today,
+        "avg_cost":   avg_cost,
+        "pnl_pct":    round((price - avg_cost) / avg_cost * 100, 2) if avg_cost else 0,
+        "log_id":     entry["id"],
     }
 
 # ─── News feed ────────────────────────────────────────────────────

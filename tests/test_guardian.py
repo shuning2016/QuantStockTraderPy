@@ -133,3 +133,77 @@ def test_check_guardian_exits_skips_missing_price():
 
     assert result["stop_losses"] == []
     assert result["take_profits"] == []
+
+
+def _make_state_for_sell():
+    state = S.new_trade_state()
+    state["cash"]    = 10_000.0
+    state["_today"]  = "2026-05-02"
+    state["_nowET"]  = "11:00"
+    state["holdings"]["AAPL"] = _make_holding(avg_cost=100.0, stop_price=97.0, shares=10)
+    return state
+
+
+def test_execute_guardian_sell_removes_holding():
+    state = _make_state_for_sell()
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    assert "AAPL" not in state["holdings"]
+
+
+def test_execute_guardian_sell_adds_cash():
+    state = _make_state_for_sell()
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    expected_cash = 10_000.0 + 96.5 * 10 * (1 - S.CFG.EXEC_SLIPPAGE)
+    assert state["cash"] == pytest.approx(expected_cash, rel=1e-6)
+
+
+def test_execute_guardian_sell_logs_guardian_tag():
+    state = _make_state_for_sell()
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    assert len(state["log"]) == 1
+    assert state["log"][0]["exit_tag"] == "GUARDIAN_STOP_LOSS"
+    assert state["log"][0]["session"] == "guardian"
+
+
+def test_execute_guardian_sell_profit_tag():
+    state = _make_state_for_sell()
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "硬止盈+5%", "tag": "HARD_PROFIT"}
+
+    app._execute_guardian_sell(state, sell, price=106.0,
+                               today="2026-05-02", now_et="11:00")
+
+    assert state["log"][0]["exit_tag"] == "GUARDIAN_HARD_PROFIT"
+
+
+def test_execute_guardian_sell_skips_if_already_sold():
+    state = _make_state_for_sell()
+    del state["holdings"]["AAPL"]  # already gone
+    sell  = {"sym": "AAPL", "shares": 10, "reason": "追踪止损$97.00", "tag": "STOP_LOSS"}
+
+    app._execute_guardian_sell(state, sell, price=96.5,
+                               today="2026-05-02", now_et="11:00")
+
+    assert state["log"] == []
+    assert state["cash"] == 10_000.0
+
+
+def test_execute_guardian_sell_partial_reduces_shares():
+    state = _make_state_for_sell()
+    sell  = {"sym": "AAPL", "shares": 5, "reason": "分批止盈+1R", "tag": "SCALE_OUT_1R"}
+
+    app._execute_guardian_sell(state, sell, price=103.0,
+                               today="2026-05-02", now_et="11:00")
+
+    assert state["holdings"]["AAPL"]["shares"] == 5
