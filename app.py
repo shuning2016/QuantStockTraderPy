@@ -33,6 +33,7 @@ from strategy_v6 import (
     build_prompt_v6, parse_ai_decisions, parse_confidence_score,
     parse_regime_from_text, parse_atr_from_text,
     execute_decisions, check_operating_rules, get_market_regime,
+    check_auto_stop_rules, build_trade_log_entry,
 )
 from weekly_review import (
     most_recent_week,
@@ -565,6 +566,114 @@ def get_single_quote(sym: str, asset_type: str) -> dict:
         return get_crypto_quote(sym) if asset_type == "crypto" else get_stock_quote(sym)
     except Exception:
         return None
+
+
+def _batch_fetch_prices(symbols: list, batch_size: int = 20) -> dict:
+    """Fetch current prices for all symbols in batches.
+
+    Sends at most `batch_size` requests per second to stay under Finnhub's
+    30 calls/sec free-tier burst limit.  Returns {sym: price} for symbols
+    with a valid (>0) last price; silently omits symbols with no price data
+    (market closed, bad ticker, or Finnhub glitch).
+    """
+    prices = {}
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
+        for sym in batch:
+            q = get_stock_quote(sym)
+            if q and q.get("c", 0) > 0:
+                prices[sym] = q["c"]
+        if i + batch_size < len(symbols):
+            time.sleep(1.0)
+    return prices
+
+
+def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
+    """Detect stop-loss and take-profit breaches for one provider's holdings.
+
+    Calls check_auto_stop_rules with the freshly fetched prices and splits
+    results by urgency:
+      stop_losses  — need 30-second confirmation before executing
+      take_profits — execute immediately (5% gain is not a wick)
+
+    Side-effects: updates highPrice and stopPrice on holdings in state
+    (legitimate tracking mutations, same as a normal session would do).
+    Also sets partial_taken on a holding when SCALE_OUT_1R fires.
+    """
+    state["lastPrices"] = prices
+    state["_nowET"] = datetime.now(_ET).strftime("%H:%M")
+
+    sells = check_auto_stop_rules(state, "guardian", provider=provider)
+
+    STOP_TAGS   = {"STOP_LOSS", "TRAIL_STOP_PROFIT", "HARD_STOP"}
+    PROFIT_TAGS = {"HARD_PROFIT", "SCALE_OUT_1R"}
+    KNOWN_TAGS  = STOP_TAGS | PROFIT_TAGS | {"REGIME_EXIT"}
+
+    for s in sells:
+        if s.get("tag") not in KNOWN_TAGS:
+            log.warning("Guardian: unrecognised sell tag %r for %s — skipping",
+                        s.get("tag"), s.get("sym"))
+
+    return {
+        "stop_losses":  [s for s in sells if s.get("tag") in STOP_TAGS],
+        "take_profits": [s for s in sells if s.get("tag") in PROFIT_TAGS],
+    }
+
+
+def _execute_guardian_sell(state: dict, sell: dict, price: float,
+                           today: str, now_et: str) -> None:
+    """Execute one guardian-triggered sell. Mutates state in place.
+
+    Reuses the same state-mutation pattern as execute_decisions so guardian
+    sells appear in trade logs, dailyPnL, cooldowns, and post_exit_watch
+    identically to session-triggered sells.  Tag is prefixed with GUARDIAN_
+    so guardian exits are distinguishable in the UI and A07 feedback loop.
+    """
+    sym      = sell["sym"]
+    holdings = state.setdefault("holdings", {})
+    if sym not in holdings:
+        return
+
+    h        = holdings[sym]
+    avg_cost = h["avgCost"]
+    shares   = sell["shares"]
+    real     = (price - avg_cost) * shares
+    tag      = "GUARDIAN_" + sell.get("tag", "STOP")
+
+    state["_today"] = today
+    state["_nowET"] = now_et
+
+    entry = build_trade_log_entry("sell", {
+        "sym":         sym,
+        "shares":      shares,
+        "price":       price,
+        "realizedPnl": real,
+        "reason":      sell["reason"],
+        "session":     "guardian",
+        "confidence":  h.get("confidence", 0),
+    }, state, tag)
+
+    state.setdefault("log", []).append(entry)
+    state["cash"] = state.get("cash", 0.0) + price * shares * (1 - CFG.EXEC_SLIPPAGE)
+    # Intentionally not incrementing todayTrades — guardian exits are system-triggered,
+    # not discretionary. Cooldown already prevents same-day re-entry for the symbol.
+    state.setdefault("dailyPnL", {})[today] = (
+        state["dailyPnL"].get(today, 0) + real
+    )
+
+    if shares >= h["shares"]:
+        del holdings[sym]
+    else:
+        h["shares"] -= shares
+
+    state.setdefault("cooldowns", {})[sym]       = today
+    state.setdefault("post_exit_watch", {})[sym] = {
+        "exit_price": price,
+        "exit_date":  today,
+        "avg_cost":   avg_cost,
+        "pnl_pct":    round((price - avg_cost) / avg_cost * 100, 2) if avg_cost else 0,
+        "log_id":     entry["id"],
+    }
 
 # ─── News feed ────────────────────────────────────────────────────
 _news_cache = {}
@@ -1396,6 +1505,258 @@ def cron_run(session, provider):
         # logical session. The error is captured in logs and the JSON body.
         return jsonify({"ok": False, "session": session, "provider": provider,
                         "error": str(e)}), 200
+
+
+_GUARDIAN_LOCK_KEY = "guardian_lock"
+_GUARDIAN_LOCK_TTL = 90  # seconds: covers 30s confirmation + execution headroom
+_GUARDIAN_HB_KEY   = "guardian:heartbeats"
+_GUARDIAN_HB_TTL   = 86400  # 24 hours in seconds
+
+
+def _record_guardian_heartbeat(record: dict) -> None:
+    """Append one guardian-run record to the Redis sorted set.
+
+    Score = Unix timestamp (float) so ZRANGEBYSCORE naturally gives time ranges.
+    Entries older than 24 h are pruned on every write so the set stays bounded.
+    """
+    if not _USE_KV:
+        return
+    ts = record.get("ts", time.time())
+    cutoff = ts - _GUARDIAN_HB_TTL
+    try:
+        # Prune entries older than 24 h, then append the new one
+        _kv(["ZREMRANGEBYSCORE", _GUARDIAN_HB_KEY, "-inf", str(cutoff)])
+        _kv(["ZADD", _GUARDIAN_HB_KEY, str(ts), json.dumps(record, ensure_ascii=False)])
+    except Exception as e:
+        _logging.getLogger("quant.guardian").warning("Heartbeat write failed: %s", e)
+
+
+@app.route("/api/cron/guardian", methods=["GET"])
+def cron_guardian():
+    """Guardian cron: intra-session stop-loss and take-profit enforcement.
+
+    Triggered by cron-job.org (not Vercel cron — every-5-min frequency
+    exceeds the Hobby plan's once-per-day limit).
+
+    Schedule on cron-job.org:
+      Job 1 — market hours:  */5 13-20 * * 1-5  (UTC)
+      Job 2 — off-hours:     0 * * * *
+    Both jobs call: GET https://<app>.vercel.app/api/cron/guardian
+    with header:    Authorization: Bearer <CRON_SECRET>
+    """
+    if not _verify_cron(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    log = _logging.getLogger("quant.guardian")
+    _t0 = time.time()
+
+    # Acquire guardian lock (atomic SET NX) — skip if a prior run is mid-flight
+    if _USE_KV:
+        token  = f"{int(time.time() * 1000)}-{os.getpid()}"
+        result = _kv(["SET", _GUARDIAN_LOCK_KEY, token, "NX", "EX",
+                       str(_GUARDIAN_LOCK_TTL)])
+        if result != "OK":
+            log.info("Guardian skipped — lock held (prior run still active)")
+            _record_guardian_heartbeat({
+                "ts": _t0, "ts_et": datetime.now(_ET).strftime("%H:%M ET"),
+                "status": "skipped", "skip_reason": "lock_held",
+                "n_checked": 0, "symbols": [],
+                "profit_executed": [], "stop_executed": [], "duration_ms": 0,
+            })
+            return jsonify({"ok": True, "status": "skipped",
+                            "reason": "guardian lock held"}), 200
+
+    try:
+        # Skip if any trading session is currently running — avoids race where
+        # both guardian and a session attempt to sell the same holding.
+        for p in _VALID_PROVIDERS:
+            for s in _VALID_SESSIONS:
+                if _USE_KV and _kv(["GET", f"session_lock:{p}:{s}"]):
+                    log.info("Guardian skipped — session lock held: %s/%s", p, s)
+                    _record_guardian_heartbeat({
+                        "ts": _t0, "ts_et": datetime.now(_ET).strftime("%H:%M ET"),
+                        "status": "skipped", "skip_reason": f"session:{p}/{s}",
+                        "n_checked": 0, "symbols": [],
+                        "profit_executed": [], "stop_executed": [], "duration_ms": 0,
+                    })
+                    return jsonify({"ok": True, "status": "skipped",
+                                    "reason": f"session lock: {p}/{s}"}), 200
+
+        today   = today_et()
+        now_et  = datetime.now(_ET).strftime("%H:%M")
+
+        # Load all three providers' states
+        states = {p: load_trade_state(p) for p in _VALID_PROVIDERS}
+
+        # Collect unique symbols currently held across all providers
+        all_symbols = list({
+            sym
+            for state in states.values()
+            for sym in state.get("holdings", {})
+        })
+
+        if not all_symbols:
+            log.info("Guardian: no holdings to check")
+            _record_guardian_heartbeat({
+                "ts": _t0, "ts_et": datetime.now(_ET).strftime("%H:%M ET"),
+                "status": "no_holdings", "skip_reason": None,
+                "n_checked": 0, "symbols": [],
+                "profit_executed": [], "stop_executed": [],
+                "duration_ms": int((time.time() - _t0) * 1000),
+            })
+            return jsonify({"ok": True, "status": "no_holdings", "checked": 0}), 200
+
+        # Batch-fetch prices (20/batch, 1s gap → ≤20 calls/sec, safe under 30/sec)
+        prices = _batch_fetch_prices(all_symbols)
+        log.info("Guardian: fetched %d/%d prices for %s",
+                 len(prices), len(all_symbols), all_symbols)
+
+        # First pass: detect exits per provider
+        suspected_stops  = {}   # {provider: [sell_dict, ...]}
+        take_profit_hits = {}   # {provider: [sell_dict, ...]}
+
+        for provider, state in states.items():
+            if not state.get("holdings"):
+                continue
+            exits = _check_guardian_exits(state, prices, provider)
+            if exits["stop_losses"]:
+                suspected_stops[provider]  = exits["stop_losses"]
+            if exits["take_profits"]:
+                take_profit_hits[provider] = exits["take_profits"]
+
+        # Execute take-profits immediately — 5% gain is not a wick
+        profit_executed = []
+        for provider, sells in take_profit_hits.items():
+            state = states[provider]
+            for sell in sells:
+                sym   = sell["sym"]
+                price = prices.get(sym, 0)
+                if price <= 0 or sym not in state.get("holdings", {}):
+                    continue
+                _execute_guardian_sell(state, sell, price, today, now_et)
+                profit_executed.append(f"{provider}/{sym}")
+                log.info("Guardian PROFIT: %s/%s @$%.2f tag=%s",
+                         provider, sym, price, sell.get("tag"))
+
+        # Confirm stop-losses: sleep 30s, re-fetch, verify breach persists
+        stop_executed = []
+        if suspected_stops:
+            stop_syms = list({
+                s["sym"]
+                for sells in suspected_stops.values()
+                for s in sells
+            })
+            log.info("Guardian: suspected stop breach on %s — confirming in 30s",
+                     stop_syms)
+            time.sleep(30)
+            confirm_prices = _batch_fetch_prices(stop_syms)
+
+            for provider, sells in suspected_stops.items():
+                state = states[provider]
+                for sell in sells:
+                    sym        = sell["sym"]
+                    conf_price = confirm_prices.get(sym, 0)
+                    holding    = state.get("holdings", {}).get(sym)
+                    if not holding or conf_price <= 0:
+                        continue
+
+                    stop_p      = holding.get("stopPrice", float("inf"))
+                    avg_cost    = holding["avgCost"]
+                    risk_per    = holding.get("riskPerShare", avg_cost * 0.02)
+                    pnl_pct     = (conf_price - avg_cost) / avg_cost * 100 if avg_cost > 0 else 0
+                    hard_stop   = max(CFG.HARD_STOP_PCT,
+                                      risk_per / avg_cost * 100 if avg_cost > 0
+                                      else CFG.HARD_STOP_PCT)
+
+                    still_breached = (conf_price <= stop_p or pnl_pct <= -hard_stop)
+
+                    if still_breached:
+                        # Clamp shares in case a take-profit partial executed first
+                        sell = dict(sell)
+                        sell["shares"] = min(sell["shares"], holding["shares"])
+                        _execute_guardian_sell(state, sell, conf_price, today, now_et)
+                        stop_executed.append(f"{provider}/{sym}")
+                        log.info("Guardian STOP confirmed: %s/%s @$%.2f",
+                                 provider, sym, conf_price)
+                    else:
+                        log.info("Guardian STOP wick filtered: %s/%s recovered $%.2f",
+                                 provider, sym, conf_price)
+
+        # Persist updated states and write guardian trades to persistent log
+        changed_providers = {p.split("/")[0] for p in profit_executed + stop_executed}
+        for provider in changed_providers:
+            save_trade_state(provider, states[provider])
+            for entry in states[provider].get("log", []):
+                if (entry.get("session") == "guardian"
+                        and entry.get("date") == today
+                        and not entry.get("_logged")):
+                    append_log("trades", entry, today)
+                    entry["_logged"] = True
+
+        log.info("Guardian complete: checked=%d stop=%s profit=%s",
+                 len(all_symbols), stop_executed, profit_executed)
+        _record_guardian_heartbeat({
+            "ts":             _t0,
+            "ts_et":          datetime.now(_ET).strftime("%H:%M ET"),
+            "status":         "checked",
+            "skip_reason":    None,
+            "n_checked":      len(all_symbols),
+            "symbols":        all_symbols,
+            "profit_executed": profit_executed,
+            "stop_executed":  stop_executed,
+            "duration_ms":    int((time.time() - _t0) * 1000),
+        })
+        return jsonify({
+            "ok":             True,
+            "status":         "checked",
+            "checked":        len(all_symbols),
+            "prices_fetched": len(prices),
+            "stop_executed":  stop_executed,
+            "profit_executed": profit_executed,
+        }), 200
+
+    except Exception as e:
+        log.error("Guardian error: %s", e, exc_info=True)
+        _record_guardian_heartbeat({
+            "ts":          _t0,
+            "ts_et":       datetime.now(_ET).strftime("%H:%M ET"),
+            "status":      "error",
+            "skip_reason": None,
+            "error":       str(e),
+            "n_checked":   0,
+            "symbols":     [],
+            "profit_executed": [], "stop_executed": [],
+            "duration_ms": int((time.time() - _t0) * 1000),
+        })
+        return jsonify({"ok": False, "error": str(e)}), 200
+    finally:
+        if _USE_KV:
+            _kv(["DEL", _GUARDIAN_LOCK_KEY])
+
+
+@app.route("/api/guardian/heartbeat", methods=["GET"])
+def guardian_heartbeat():
+    """Return guardian heartbeat records from the last 24 hours.
+
+    Records are stored in a Redis sorted set (score = Unix timestamp).
+    Returned newest-first so the widget can render top-to-bottom.
+    """
+    if not _USE_KV:
+        return jsonify({"ok": True, "records": [], "note": "KV not configured"}), 200
+
+    cutoff = time.time() - _GUARDIAN_HB_TTL
+    try:
+        raw = _kv(["ZRANGEBYSCORE", _GUARDIAN_HB_KEY, str(cutoff), "+inf"]) or []
+        records = []
+        for item in raw:
+            try:
+                records.append(json.loads(item))
+            except Exception:
+                pass
+        records.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        return jsonify({"ok": True, "records": records}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "records": []}), 200
 
 
 @app.route("/api/cron/status", methods=["GET"])
