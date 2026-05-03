@@ -1509,6 +1509,26 @@ def cron_run(session, provider):
 
 _GUARDIAN_LOCK_KEY = "guardian_lock"
 _GUARDIAN_LOCK_TTL = 90  # seconds: covers 30s confirmation + execution headroom
+_GUARDIAN_HB_KEY   = "guardian:heartbeats"
+_GUARDIAN_HB_TTL   = 86400  # 24 hours in seconds
+
+
+def _record_guardian_heartbeat(record: dict) -> None:
+    """Append one guardian-run record to the Redis sorted set.
+
+    Score = Unix timestamp (float) so ZRANGEBYSCORE naturally gives time ranges.
+    Entries older than 24 h are pruned on every write so the set stays bounded.
+    """
+    if not _USE_KV:
+        return
+    ts = record.get("ts", time.time())
+    cutoff = ts - _GUARDIAN_HB_TTL
+    try:
+        # Prune entries older than 24 h, then append the new one
+        _kv(["ZREMRANGEBYSCORE", _GUARDIAN_HB_KEY, "-inf", str(cutoff)])
+        _kv(["ZADD", _GUARDIAN_HB_KEY, str(ts), json.dumps(record, ensure_ascii=False)])
+    except Exception as e:
+        _logging.getLogger("quant.guardian").warning("Heartbeat write failed: %s", e)
 
 
 @app.route("/api/cron/guardian", methods=["GET"])
@@ -1528,6 +1548,7 @@ def cron_guardian():
         return jsonify({"error": "Unauthorized"}), 401
 
     log = _logging.getLogger("quant.guardian")
+    _t0 = time.time()
 
     # Acquire guardian lock (atomic SET NX) — skip if a prior run is mid-flight
     if _USE_KV:
@@ -1536,6 +1557,12 @@ def cron_guardian():
                        str(_GUARDIAN_LOCK_TTL)])
         if result != "OK":
             log.info("Guardian skipped — lock held (prior run still active)")
+            _record_guardian_heartbeat({
+                "ts": _t0, "ts_et": datetime.now(_ET).strftime("%H:%M ET"),
+                "status": "skipped", "skip_reason": "lock_held",
+                "n_checked": 0, "symbols": [],
+                "profit_executed": [], "stop_executed": [], "duration_ms": 0,
+            })
             return jsonify({"ok": True, "status": "skipped",
                             "reason": "guardian lock held"}), 200
 
@@ -1546,6 +1573,12 @@ def cron_guardian():
             for s in _VALID_SESSIONS:
                 if _USE_KV and _kv(["GET", f"session_lock:{p}:{s}"]):
                     log.info("Guardian skipped — session lock held: %s/%s", p, s)
+                    _record_guardian_heartbeat({
+                        "ts": _t0, "ts_et": datetime.now(_ET).strftime("%H:%M ET"),
+                        "status": "skipped", "skip_reason": f"session:{p}/{s}",
+                        "n_checked": 0, "symbols": [],
+                        "profit_executed": [], "stop_executed": [], "duration_ms": 0,
+                    })
                     return jsonify({"ok": True, "status": "skipped",
                                     "reason": f"session lock: {p}/{s}"}), 200
 
@@ -1564,6 +1597,13 @@ def cron_guardian():
 
         if not all_symbols:
             log.info("Guardian: no holdings to check")
+            _record_guardian_heartbeat({
+                "ts": _t0, "ts_et": datetime.now(_ET).strftime("%H:%M ET"),
+                "status": "no_holdings", "skip_reason": None,
+                "n_checked": 0, "symbols": [],
+                "profit_executed": [], "stop_executed": [],
+                "duration_ms": int((time.time() - _t0) * 1000),
+            })
             return jsonify({"ok": True, "status": "no_holdings", "checked": 0}), 200
 
         # Batch-fetch prices (20/batch, 1s gap → ≤20 calls/sec, safe under 30/sec)
@@ -1655,6 +1695,17 @@ def cron_guardian():
 
         log.info("Guardian complete: checked=%d stop=%s profit=%s",
                  len(all_symbols), stop_executed, profit_executed)
+        _record_guardian_heartbeat({
+            "ts":             _t0,
+            "ts_et":          datetime.now(_ET).strftime("%H:%M ET"),
+            "status":         "checked",
+            "skip_reason":    None,
+            "n_checked":      len(all_symbols),
+            "symbols":        all_symbols,
+            "profit_executed": profit_executed,
+            "stop_executed":  stop_executed,
+            "duration_ms":    int((time.time() - _t0) * 1000),
+        })
         return jsonify({
             "ok":             True,
             "status":         "checked",
@@ -1666,10 +1717,46 @@ def cron_guardian():
 
     except Exception as e:
         log.error("Guardian error: %s", e, exc_info=True)
+        _record_guardian_heartbeat({
+            "ts":          _t0,
+            "ts_et":       datetime.now(_ET).strftime("%H:%M ET"),
+            "status":      "error",
+            "skip_reason": None,
+            "error":       str(e),
+            "n_checked":   0,
+            "symbols":     [],
+            "profit_executed": [], "stop_executed": [],
+            "duration_ms": int((time.time() - _t0) * 1000),
+        })
         return jsonify({"ok": False, "error": str(e)}), 200
     finally:
         if _USE_KV:
             _kv(["DEL", _GUARDIAN_LOCK_KEY])
+
+
+@app.route("/api/guardian/heartbeat", methods=["GET"])
+def guardian_heartbeat():
+    """Return guardian heartbeat records from the last 24 hours.
+
+    Records are stored in a Redis sorted set (score = Unix timestamp).
+    Returned newest-first so the widget can render top-to-bottom.
+    """
+    if not _USE_KV:
+        return jsonify({"ok": True, "records": [], "note": "KV not configured"}), 200
+
+    cutoff = time.time() - _GUARDIAN_HB_TTL
+    try:
+        raw = _kv(["ZRANGEBYSCORE", _GUARDIAN_HB_KEY, str(cutoff), "+inf"]) or []
+        records = []
+        for item in raw:
+            try:
+                records.append(json.loads(item))
+            except Exception:
+                pass
+        records.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        return jsonify({"ok": True, "records": records}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "records": []}), 200
 
 
 @app.route("/api/cron/status", methods=["GET"])

@@ -354,6 +354,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="tab"        id="tab-messages" onclick="switchTab('messages')">交易记录</div>
       <div class="tab"        id="tab-daily"    onclick="switchTab('daily')">📋 日检</div>
       <div class="tab"        id="tab-weekly"   onclick="switchTab('weekly')">周报 &amp; 建议</div>
+      <div class="tab"        id="tab-guardian" onclick="switchTab('guardian')">🛡️ 全部记录</div>
     </div>
 
     <!-- News panel -->
@@ -407,6 +408,20 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       </div>
       <div id="dr-content">
         <div class="empty-panel">选择日期后点击「运行日检」</div>
+      </div>
+    </div>
+
+    <!-- Guardian Heartbeat panel -->
+    <div id="panel-guardian" style="display:none">
+      <div class="section-card">
+        <div class="section-title">
+          <span>🛡️ 守护心跳 — 全部记录 <span id="gd-count" style="font-weight:400;color:var(--t3);font-size:11px"></span></span>
+          <span style="display:flex;align-items:center;gap:10px">
+            <span id="gd-refresh-note" style="font-size:11px;color:var(--t3)">60s 自动刷新</span>
+            <button class="btn btn-sm" style="padding:3px 12px;font-size:12px" onclick="loadGuardianHeartbeats()">↺ 刷新</button>
+          </span>
+        </div>
+        <div id="gd-body"><div class="empty-panel" style="padding:32px">加载中…</div></div>
       </div>
     </div>
 
@@ -678,13 +693,14 @@ async function analyzeItem(sym,type){
 // ═══════════════════════════════════════════════════════════════
 //  TAB SWITCHING
 // ═══════════════════════════════════════════════════════════════
-let _currentLogTab='sessions', _tradeTimer=null;
+let _currentLogTab='sessions', _tradeTimer=null, _gdTimer=null;
 function switchTab(n){
-  ['news','trade','messages','daily','weekly'].forEach(t=>{
+  ['news','trade','messages','daily','weekly','guardian'].forEach(t=>{
     document.getElementById('panel-'+t).style.display=t===n?'':'none';
     document.getElementById('tab-'+t).className='tab'+(t===n?' active':'');
   });
   if(_tradeTimer){clearInterval(_tradeTimer);_tradeTimer=null;}
+  if(_gdTimer){clearInterval(_gdTimer);_gdTimer=null;}
   if(n==='trade'){
     initTradePanel();
     _tradeTimer=setInterval(()=>{if(isMarketHours())refreshTradePanel();},30*60*1000);
@@ -700,6 +716,10 @@ function switchTab(n){
   }
   if(n==='weekly') initWeeklyPanel();
   if(n==='daily')  initDailyPanel();
+  if(n==='guardian'){
+    loadGuardianHeartbeats();
+    _gdTimer=setInterval(loadGuardianHeartbeats,60*1000);
+  }
 }
 
 async function checkKvStatus(){
@@ -1673,6 +1693,66 @@ function renderDailyReview(data){
     document.getElementById('backend-status').textContent='离线';
   }
 })();
+
+// ── Guardian heartbeat widget ────────────────────────────────────────────────
+async function loadGuardianHeartbeats(){
+  const body=document.getElementById('gd-body');
+  try{
+    const res=await fetch('/api/guardian/heartbeat');
+    const data=await res.json();
+    const records=data.records||[];
+    document.getElementById('gd-count').textContent=
+      records.length?`· ${records.length} 条 / 最近24小时`:'';
+    if(!records.length){
+      body.innerHTML='<div class="empty-panel" style="padding:32px">暂无记录 — 等待第一次守护触发</div>';
+      return;
+    }
+    body.innerHTML=`
+<table style="width:100%;border-collapse:collapse;font-size:12px">
+  <thead>
+    <tr style="border-bottom:1px solid var(--bdr)">
+      <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">时间 (ET)</th>
+      <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">状态</th>
+      <th style="text-align:right;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">检查</th>
+      <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">操作</th>
+      <th style="text-align:right;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">耗时</th>
+    </tr>
+  </thead>
+  <tbody>${records.map(r=>_gdRow(r)).join('')}</tbody>
+</table>`;
+  }catch(e){
+    body.innerHTML=`<div class="empty-panel" style="color:var(--red)">加载失败: ${e.message}</div>`;
+  }
+}
+
+function _gdRow(r){
+  const status=r.status||'unknown';
+  const badges={
+    checked:    ['var(--blue-l)','var(--blue)','✓ 已检查'],
+    no_holdings:['var(--bg)','var(--t3)','— 无持仓'],
+    skipped:    ['var(--amber-l)','var(--amber)','⏭ 跳过'],
+    error:      ['var(--red-l)','var(--red)','✗ 错误'],
+  };
+  const [bg,fg,label]=badges[status]||['var(--bg)','var(--t3)',status];
+  const badge=`<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;background:${bg};color:${fg}">${label}</span>`;
+
+  const profits=(r.profit_executed||[]).map(s=>`<span style="display:inline-block;margin:1px 2px;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:700;background:var(--blue-l);color:var(--blue)">💰 ${s.split('/')[1]||s}</span>`).join('');
+  const stops=(r.stop_executed||[]).map(s=>`<span style="display:inline-block;margin:1px 2px;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:700;background:var(--red-l);color:var(--red)">🛑 ${s.split('/')[1]||s}</span>`).join('');
+  const skipNote=r.skip_reason?`<span style="font-size:10px;color:var(--t3)">${r.skip_reason}</span>`:'';
+  const errNote=r.error?`<span style="font-size:10px;color:var(--red)" title="${r.error}">⚠ ${r.error.slice(0,40)}</span>`:'';
+  const actions=profits+stops+skipNote+errNote||'<span style="color:var(--t3)">—</span>';
+
+  const dur=r.duration_ms>0?`${(r.duration_ms/1000).toFixed(1)}s`:'—';
+  const n=r.n_checked>0?`<b>${r.n_checked}</b> 只`:'—';
+
+  return `<tr style="border-bottom:1px solid var(--bg)">
+    <td style="padding:8px 10px;font-family:monospace;font-size:11px;white-space:nowrap">${r.ts_et||'—'}</td>
+    <td style="padding:8px 10px">${badge}</td>
+    <td style="padding:8px 10px;text-align:right;color:var(--t2)">${n}</td>
+    <td style="padding:8px 10px">${actions}</td>
+    <td style="padding:8px 10px;text-align:right;color:var(--t3);font-size:11px">${dur}</td>
+  </tr>`;
+}
 </script>
 </body>
 </html>
