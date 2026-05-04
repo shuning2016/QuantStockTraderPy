@@ -1711,7 +1711,7 @@ async function loadGuardianHeartbeats(){
 <table style="width:100%;border-collapse:collapse;font-size:12px">
   <thead>
     <tr style="border-bottom:1px solid var(--bdr)">
-      <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">时间 (ET)</th>
+      <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">时间 (SGT)</th>
       <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">状态</th>
       <th style="text-align:right;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">检查</th>
       <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">操作</th>
@@ -1745,8 +1745,9 @@ function _gdRow(r){
   const dur=r.duration_ms>0?`${(r.duration_ms/1000).toFixed(1)}s`:'—';
   const n=r.n_checked>0?`<b>${r.n_checked}</b> 只`:'—';
 
+  const sgt=r.ts?new Date(r.ts*1000).toLocaleTimeString('en-GB',{timeZone:'Asia/Singapore',hour:'2-digit',minute:'2-digit'})+' SGT':'—';
   return `<tr style="border-bottom:1px solid var(--bg)">
-    <td style="padding:8px 10px;font-family:monospace;font-size:11px;white-space:nowrap">${r.ts_et||'—'}</td>
+    <td style="padding:8px 10px;font-family:monospace;font-size:11px;white-space:nowrap">${sgt}</td>
     <td style="padding:8px 10px">${badge}</td>
     <td style="padding:8px 10px;text-align:right;color:var(--t2)">${n}</td>
     <td style="padding:8px 10px">${actions}</td>
