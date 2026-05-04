@@ -932,7 +932,7 @@ _COMMON = ("风控: 仓位=净值×1.5%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止
            # tightening ATR-based stops to fit -2%, putting stops inside noise.
            "风控扩展: 若1.5×ATR>2%(波动过大)→跳过该股写HOLD，禁止把止损调紧到-2%(噪音区会被扫损)\n"
            # FIX-#7: mechanically prevent chase entries on already-extended movers.
-           "风控扩展: 单只持仓≤净值20%|当日已涨>5%标的不新入场，等待回调或次日入场\n"
+           "风控扩展: 单只持仓≤净值20%|当日已涨>3.5%标的不新入场，等待回调或次日入场\n"
            # BUG-3: trailing multipliers updated to 2.0/1.5 — prompt kept in sync
            "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-2.0ATR|盈≥2R→最高价-1.5ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
@@ -1166,7 +1166,8 @@ def build_trade_log_entry(action: str, trade_info: dict, state: dict, tag: str =
 # ─── Section 11: Execution Engine ────────────────────────────────
 def execute_decisions(decisions: list, state: dict, session: str,
                       prices: dict, atr_estimates: dict,
-                      provider: str = "", account_ctx: dict = None) -> list:
+                      provider: str = "", account_ctx: dict = None,
+                      day_changes: dict = None) -> list:
     executed = []
     holdings = state.setdefault("holdings", {})
     log      = state.setdefault("log", [])
@@ -1234,6 +1235,25 @@ def execute_decisions(decisions: list, state: dict, session: str,
         if action == "BUY":
             if session == "closing":
                 executed.append(f"⚠️ {sym} 收尾禁止新开仓"); continue
+            # B3: block overnight SWING entries on Fridays — no stop-loss coverage
+            # over the weekend; a gap Monday morning bypasses any stop.
+            if today:
+                try:
+                    _wd = datetime.strptime(today, "%Y-%m-%d").weekday()
+                except ValueError:
+                    _wd = -1
+                if _wd == 4 and _parse_timeframe(reason) == "SWING":
+                    executed.append(
+                        f"⚠️ {sym} 周五禁止开[SWING]隔夜仓，避免周末缺口风险，跳过"
+                    ); continue
+            # B1: gap-up filter — stock already up ≥3.5% today leaves <1.5%
+            # upside to the +5% hard profit target; R:R collapses.
+            if day_changes:
+                _dp = day_changes.get(sym)
+                if _dp is not None and _dp >= 3.5:
+                    executed.append(
+                        f"⚠️ {sym} 今日已涨{_dp:.1f}%≥3.5%阈值，上涨空间不足，跳过"
+                    ); continue
             # FIX-3: block prose_fallback BUYs — R:R, signal quality and ATR cannot be
             # verified from a prose parse.  The AI must use structured pipe format.
             # This prevents unverified entries from bypassing every downstream gate.

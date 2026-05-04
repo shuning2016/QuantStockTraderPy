@@ -568,24 +568,29 @@ def get_single_quote(sym: str, asset_type: str) -> dict:
         return None
 
 
-def _batch_fetch_prices(symbols: list, batch_size: int = 20) -> dict:
+def _batch_fetch_prices(symbols: list, batch_size: int = 20) -> tuple:
     """Fetch current prices for all symbols in batches.
 
     Sends at most `batch_size` requests per second to stay under Finnhub's
-    30 calls/sec free-tier burst limit.  Returns {sym: price} for symbols
-    with a valid (>0) last price; silently omits symbols with no price data
-    (market closed, bad ticker, or Finnhub glitch).
+    30 calls/sec free-tier burst limit.  Returns (prices, day_changes) where:
+      prices      — {sym: current_price} for symbols with a valid (>0) price
+      day_changes — {sym: dp_pct} intraday % change vs prev close (B1 gate)
+    Symbols with no price data are silently omitted from both dicts.
     """
     prices = {}
+    day_changes = {}
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i : i + batch_size]
         for sym in batch:
             q = get_stock_quote(sym)
             if q and q.get("c", 0) > 0:
                 prices[sym] = q["c"]
+                dp = q.get("dp")
+                if dp is not None:
+                    day_changes[sym] = float(dp)
         if i + batch_size < len(symbols):
             time.sleep(1.0)
-    return prices
+    return prices, day_changes
 
 
 def _check_guardian_exits(state: dict, prices: dict, provider: str) -> dict:
@@ -1070,6 +1075,10 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                 atr_est[sym] = atr
                 _quotes[sym] = q  # cache for watchlist text below — avoids second fetch
 
+    # B1: build intraday % change dict from already-fetched quotes (no extra API calls).
+    day_changes = {sym: float(q["dp"]) for sym, q in _quotes.items()
+                   if q.get("dp") is not None}
+
     # Fetch news (also parallelised inside get_news_for_items via cache; runs
     # after price fetch so the cache is warm for any overlapping calls).
     news_data = get_news_for_items(stock_items, 3)
@@ -1258,7 +1267,8 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
             account_ctx = {}
 
         executed = execute_decisions(decisions, state, session, prices, atr_est,
-                                     provider=provider, account_ctx=account_ctx)
+                                     provider=provider, account_ctx=account_ctx,
+                                     day_changes=day_changes)
 
         _logger.info("[%s/%s] ── EXECUTION RESULTS (%d) ──────────────────",
                      provider, session, len(executed))
@@ -1607,7 +1617,7 @@ def cron_guardian():
             return jsonify({"ok": True, "status": "no_holdings", "checked": 0}), 200
 
         # Batch-fetch prices (20/batch, 1s gap → ≤20 calls/sec, safe under 30/sec)
-        prices = _batch_fetch_prices(all_symbols)
+        prices, _ = _batch_fetch_prices(all_symbols)
         log.info("Guardian: fetched %d/%d prices for %s",
                  len(prices), len(all_symbols), all_symbols)
 
@@ -1649,7 +1659,7 @@ def cron_guardian():
             log.info("Guardian: suspected stop breach on %s — confirming in 30s",
                      stop_syms)
             time.sleep(30)
-            confirm_prices = _batch_fetch_prices(stop_syms)
+            confirm_prices, _ = _batch_fetch_prices(stop_syms)
 
             for provider, sells in suspected_stops.items():
                 state = states[provider]

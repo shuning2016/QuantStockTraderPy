@@ -10,27 +10,31 @@ import strategy_v6 as S  # noqa: E402
 
 
 def test_batch_fetch_prices_returns_all_symbols(monkeypatch):
-    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 100.0 + ord(sym[0])})
+    monkeypatch.setattr(app, "get_stock_quote",
+                        lambda sym: {"c": 100.0 + ord(sym[0]), "dp": 1.5})
     monkeypatch.setattr(app.time, "sleep", lambda x: None)
 
-    result = app._batch_fetch_prices(["AAPL", "MSFT", "NVDA"])
+    prices, day_changes = app._batch_fetch_prices(["AAPL", "MSFT", "NVDA"])
 
-    assert set(result.keys()) == {"AAPL", "MSFT", "NVDA"}
-    assert all(v > 0 for v in result.values())
+    assert set(prices.keys()) == {"AAPL", "MSFT", "NVDA"}
+    assert all(v > 0 for v in prices.values())
+    assert set(day_changes.keys()) == {"AAPL", "MSFT", "NVDA"}
+    assert all(v == 1.5 for v in day_changes.values())
 
 
 def test_batch_fetch_prices_skips_zero_price(monkeypatch):
-    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 0.0})
+    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 0.0, "dp": 0.0})
     monkeypatch.setattr(app.time, "sleep", lambda x: None)
 
-    result = app._batch_fetch_prices(["AAPL"])
+    prices, day_changes = app._batch_fetch_prices(["AAPL"])
 
-    assert result == {}
+    assert prices == {}
+    assert day_changes == {}
 
 
 def test_batch_fetch_prices_sleeps_between_batches(monkeypatch):
     sleep_calls = []
-    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 50.0})
+    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 50.0, "dp": 0.5})
     monkeypatch.setattr(app.time, "sleep", lambda x: sleep_calls.append(x))
 
     # 25 symbols → 2 batches of 20 and 5 → 1 sleep between them
@@ -43,7 +47,7 @@ def test_batch_fetch_prices_sleeps_between_batches(monkeypatch):
 
 def test_batch_fetch_prices_no_sleep_for_single_batch(monkeypatch):
     sleep_calls = []
-    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 50.0})
+    monkeypatch.setattr(app, "get_stock_quote", lambda sym: {"c": 50.0, "dp": 0.5})
     monkeypatch.setattr(app.time, "sleep", lambda x: sleep_calls.append(x))
 
     app._batch_fetch_prices(["AAPL", "MSFT"])
@@ -55,9 +59,10 @@ def test_batch_fetch_prices_handles_none_quote(monkeypatch):
     monkeypatch.setattr(app, "get_stock_quote", lambda sym: None)
     monkeypatch.setattr(app.time, "sleep", lambda x: None)
 
-    result = app._batch_fetch_prices(["AAPL"])
+    prices, day_changes = app._batch_fetch_prices(["AAPL"])
 
-    assert result == {}
+    assert prices == {}
+    assert day_changes == {}
 
 
 def _make_holding(avg_cost=100.0, stop_price=97.0, shares=10,
