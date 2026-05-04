@@ -354,7 +354,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="tab"        id="tab-messages" onclick="switchTab('messages')">交易记录</div>
       <div class="tab"        id="tab-daily"    onclick="switchTab('daily')">📋 日检</div>
       <div class="tab"        id="tab-weekly"   onclick="switchTab('weekly')">周报 &amp; 建议</div>
-      <div class="tab"        id="tab-guardian" onclick="switchTab('guardian')">🛡️ 全部记录</div>
+      <div class="tab"        id="tab-guardian" onclick="switchTab('guardian')">🛡️ 心电感应</div>
     </div>
 
     <!-- News panel -->
@@ -415,7 +415,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
     <div id="panel-guardian" style="display:none">
       <div class="section-card">
         <div class="section-title">
-          <span>🛡️ 守护心跳 — 全部记录 <span id="gd-count" style="font-weight:400;color:var(--t3);font-size:11px"></span></span>
+          <span>🛡️ 守护心跳 — 心电感应 <span id="gd-count" style="font-weight:400;color:var(--t3);font-size:11px"></span></span>
           <span style="display:flex;align-items:center;gap:10px">
             <span id="gd-refresh-note" style="font-size:11px;color:var(--t3)">60s 自动刷新</span>
             <button class="btn btn-sm" style="padding:3px 12px;font-size:12px" onclick="loadGuardianHeartbeats()">↺ 刷新</button>
@@ -432,7 +432,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
         请在 <strong>Vercel Dashboard → Storage → Upstash → 创建 Redis 数据库（免费）→ Connect Project</strong>，系统自动注入 <code>UPSTASH_REDIS_REST_URL</code> 和 <code>UPSTASH_REDIS_REST_TOKEN</code> 环境变量。
       </div>
       <div class="log-tab-row">
-        <button class="log-tab-btn active" id="ltab-sessions" onclick="switchLogTab('sessions')">📊 全部记录</button>
+        <button class="log-tab-btn active" id="ltab-sessions" onclick="switchLogTab('sessions')">📊 心电感应</button>
         <button class="log-tab-btn"        id="ltab-trades"   onclick="switchLogTab('trades')">💹 交易记录</button>
       </div>
       <div class="log-filter-row">
