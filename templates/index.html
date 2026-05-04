@@ -94,6 +94,8 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .q-badge{font-size:10px;font-weight:700;padding:1px 7px;border-radius:3px}
 .q-badge.stock{background:var(--blue-l);color:var(--blue)}
 .q-badge.crypto{background:var(--orange-l);color:var(--orange)}
+.q-badge.earnings{background:#fff3cd;color:#856404}
+.q-badge.earnings.today{background:#f8d7da;color:#721c24}
 .q-price{font-size:22px;font-weight:700;color:var(--t)}
 .q-ts{font-size:11px;color:var(--t3)}
 .q-chg{font-size:14px;font-weight:600}
@@ -532,7 +534,7 @@ const itemKey=(sym,type)=>sym+':'+type;
 // ═══════════════════════════════════════════════════════════════
 //  WATCHLIST
 // ═══════════════════════════════════════════════════════════════
-let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={};
+let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={}, earningsCache={};
 
 async function loadStocks(){
   // Priority 1: localStorage (instant, survives Vercel cold starts)
@@ -556,6 +558,14 @@ async function loadStocks(){
     localStorage.setItem('wl', JSON.stringify(stocks));
     renderLists(); renderChips();
   }catch(e){ /* backend unavailable — localStorage copy is source of truth */ }
+  // Load earnings calendar in background after watchlist is ready
+  try{
+    const ed = await api('getEarnings', {stocks});
+    if(ed && typeof ed === 'object'){
+      earningsCache = ed;
+      renderLists();
+    }
+  }catch(e){}
 }
 async function addItem(type){
   const id=type==='stock'?'stock-inp':'crypto-inp';
@@ -621,11 +631,21 @@ async function refreshQuote(sym,type){
     }catch(e){}
   },300);
 }
+function earningsBadge(sym){
+  const date=earningsCache[sym.toUpperCase()];
+  if(!date)return'';
+  const today=new Date().toISOString().slice(0,10);
+  const isToday=date===today;
+  const mm=date.slice(5,7).replace(/^0/,''),dd=date.slice(8,10).replace(/^0/,'');
+  const label=isToday?'今日财报':`财报 ${mm}/${dd}`;
+  return`<span class="q-badge earnings${isToday?' today':''}">${label}</span>`;
+}
 function buildCard(item,loading){
   const key=itemKey(item.symbol,item.type),ic=item.type==='crypto',q=quoteCache[key],news=newsCache[key];
+  const eBadge=!ic?earningsBadge(item.symbol):'';
   let qHead='';
   if(loading){
-    qHead=`<div class="qcard-head"><span class="q-sym${ic?' crypto':''}">${item.symbol}</span><span class="q-badge ${ic?'crypto':'stock'}">${ic?'Crypto':'Stock'}</span><span style="font-size:13px;color:var(--t3);display:flex;align-items:center;gap:6px"><span class="sp dk"></span>查询中…</span></div>`;
+    qHead=`<div class="qcard-head"><span class="q-sym${ic?' crypto':''}">${item.symbol}</span><span class="q-badge ${ic?'crypto':'stock'}">${ic?'Crypto':'Stock'}</span>${eBadge}<span style="font-size:13px;color:var(--t3);display:flex;align-items:center;gap:6px"><span class="sp dk"></span>查询中…</span></div>`;
   }else if(q&&q.pc!=null){
     const hl=q.d!=null,up=hl&&q.d>=0,cls=!hl?'flat':Math.abs(q.dp)<0.05?'flat':up?'up':'down';
     const arrow=cls==='up'?'▲':cls==='down'?'▼':'',sign=up?'+':'';
@@ -634,9 +654,9 @@ function buildCard(item,loading){
     if(ic&&q.mcap){meta=`<div class="q-meta"><div class="qstat"><span class="qstat-l">市值</span><span class="qstat-v">$${(q.mcap/1e9).toFixed(1)}B</span></div><div class="qstat"><span class="qstat-l">24h量</span><span class="qstat-v">$${(q.vol/1e9).toFixed(1)}B</span></div>${q.rank?`<div class="qstat"><span class="qstat-l">排名</span><span class="qstat-v">#${q.rank}</span></div>`:''}</div>`;}
     else if(!ic){meta=`<div class="q-meta"><div class="qstat"><span class="qstat-l">开盘</span><span class="qstat-v">${fmtP(q.o,false)}</span></div><div class="qstat"><span class="qstat-l">最高</span><span class="qstat-v">${fmtP(q.h,false)}</span></div><div class="qstat"><span class="qstat-l">最低</span><span class="qstat-v">${fmtP(q.l,false)}</span></div><div class="qstat"><span class="qstat-l">昨收</span><span class="qstat-v">${fmtP(q.pc,false)}</span></div></div>`;}
     const rtTag=q.isRealtime?'':`<span class="q-tag">昨收价</span>`;
-    qHead=`<div class="qcard-head"><div style="display:flex;flex-direction:column;gap:2px"><div style="display:flex;align-items:center;gap:7px"><span class="q-sym${ic?' crypto':''}">${item.symbol}</span><span class="q-badge ${ic?'crypto':'stock'}">${ic?'Crypto':'Stock'}</span>${rtTag}</div><span class="q-ts">更新 ${fmtTime(q.fetchedAt)}</span></div><div><div class="q-price">${fmtP(q.c,ic)}</div></div><div><span class="q-chg ${cls}">${chgStr}</span></div>${meta}</div>`;
+    qHead=`<div class="qcard-head"><div style="display:flex;flex-direction:column;gap:2px"><div style="display:flex;align-items:center;gap:7px"><span class="q-sym${ic?' crypto':''}">${item.symbol}</span><span class="q-badge ${ic?'crypto':'stock'}">${ic?'Crypto':'Stock'}</span>${eBadge}${rtTag}</div><span class="q-ts">更新 ${fmtTime(q.fetchedAt)}</span></div><div><div class="q-price">${fmtP(q.c,ic)}</div></div><div><span class="q-chg ${cls}">${chgStr}</span></div>${meta}</div>`;
   }else{
-    qHead=`<div class="qcard-head"><span class="q-sym${ic?' crypto':''}">${item.symbol}</span><span class="q-badge ${ic?'crypto':'stock'}">${ic?'Crypto':'Stock'}</span><span style="font-size:12px;color:var(--t3)">尚未查询</span></div>`;
+    qHead=`<div class="qcard-head"><span class="q-sym${ic?' crypto':''}">${item.symbol}</span><span class="q-badge ${ic?'crypto':'stock'}">${ic?'Crypto':'Stock'}</span>${eBadge}<span style="font-size:12px;color:var(--t3)">尚未查询</span></div>`;
   }
   let newsHtml='';
   if(news&&news.length){newsHtml=`<div class="news-section"><div class="news-sec-title">近 24h 新闻</div>${news.map(n=>`<div class="nc${ic?' crypto':''}"><div class="nc-meta"><span class="nc-src">${esc(n.source)}</span><span style="color:var(--bdr)">·</span><span class="nc-time">${fmtTime(n.datetime)}</span>${sentBadge(n.sentiment)}</div><a class="nc-hl" href="${n.url}" target="_blank" rel="noopener">${esc(n.headline)}</a>${n.summary?`<div class="nc-sum">${esc(n.summary.slice(0,200))}${n.summary.length>200?'…':''}</div>`:''}<a class="nc-more" href="${n.url}" target="_blank" rel="noopener">查看详细 →</a></div>`).join('')}</div>`;}

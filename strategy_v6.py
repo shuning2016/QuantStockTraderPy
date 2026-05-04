@@ -1167,7 +1167,8 @@ def build_trade_log_entry(action: str, trade_info: dict, state: dict, tag: str =
 def execute_decisions(decisions: list, state: dict, session: str,
                       prices: dict, atr_estimates: dict,
                       provider: str = "", account_ctx: dict = None,
-                      day_changes: dict = None) -> list:
+                      day_changes: dict = None,
+                      earnings_today: set = None) -> list:
     executed = []
     holdings = state.setdefault("holdings", {})
     log      = state.setdefault("log", [])
@@ -1248,12 +1249,20 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     ); continue
             # B1: gap-up filter — stock already up ≥3.5% today leaves <1.5%
             # upside to the +5% hard profit target; R:R collapses.
+            # Exception: earnings day gaps are news-driven; allow entry but
+            # confirm hard profit target is from actual entry price (avgCost).
             if day_changes:
                 _dp = day_changes.get(sym)
                 if _dp is not None and _dp >= 3.5:
-                    executed.append(
-                        f"⚠️ {sym} 今日已涨{_dp:.1f}%≥3.5%阈值，上涨空间不足，跳过"
-                    ); continue
+                    if sym in (earnings_today or set()):
+                        executed.append(
+                            f"ℹ️ {sym} 今日已涨{_dp:.1f}% — 财报日例外，继续执行；"
+                            f"止盈目标基于入场价${price:.2f}×1.05"
+                        )
+                    else:
+                        executed.append(
+                            f"⚠️ {sym} 今日已涨{_dp:.1f}%≥3.5%阈值，上涨空间不足，跳过"
+                        ); continue
             # FIX-3: block prose_fallback BUYs — R:R, signal quality and ATR cannot be
             # verified from a prose parse.  The AI must use structured pipe format.
             # This prevents unverified entries from bypassing every downstream gate.

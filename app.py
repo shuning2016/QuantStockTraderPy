@@ -462,6 +462,77 @@ def get_stock_quote(sym: str) -> dict:
 _atr_cache: dict = {}   # sym → {"atr": float, "_ts": float}
 _ATR_CACHE_TTL = 3600  # 1 hour — ATR changes slowly intraday
 
+# ─── Earnings calendar (Finnhub) ─────────────────────────────────
+_earnings_cal_cache: dict = {}   # "from:to" → {"ts": float, "data": list}
+_EARNINGS_CAL_TTL   = 21600      # 6 hours — earnings dates don't shift intraday
+
+def _fetch_earnings_calendar(from_date: str, to_date: str) -> list:
+    """Return raw earningsCalendar list from Finnhub for [from_date, to_date].
+    Each entry: {"symbol": str, "date": "YYYY-MM-DD", "hour": "bmo"|"amc"|"dmh"}.
+    Results cached for 6 hours. Returns [] on any error.
+    """
+    key = f"{from_date}:{to_date}"
+    cached = _earnings_cal_cache.get(key)
+    if cached and (time.time() - cached["ts"]) < _EARNINGS_CAL_TTL:
+        return cached["data"]
+    try:
+        url = (f"https://finnhub.io/api/v1/calendar/earnings"
+               f"?from={from_date}&to={to_date}&token={FINNHUB_KEY}")
+        r = requests.get(url, timeout=8)
+        r.raise_for_status()
+        data = r.json().get("earningsCalendar") or []
+        _earnings_cal_cache[key] = {"ts": time.time(), "data": data}
+        return data
+    except Exception as _e:
+        log.warning("Earnings calendar fetch failed (%s→%s): %s", from_date, to_date, _e)
+        return []
+
+def get_earnings_today(today: str) -> set:
+    """Symbols that would cause an earnings-driven gap at today's open.
+
+    Includes:
+      - BMO / DMH reports dated today (announced before or during market)
+      - AMC reports dated yesterday (announced after close → gap shows today)
+    Returns empty set on any error so callers fail open (don't block trades).
+    """
+    try:
+        dt_today = datetime.strptime(today, "%Y-%m-%d").date()
+        dt_yest  = (dt_today - timedelta(days=1)).strftime("%Y-%m-%d")
+        entries  = _fetch_earnings_calendar(dt_yest, today)
+        result   = set()
+        for e in entries:
+            sym  = (e.get("symbol") or "").upper()
+            date = e.get("date", "")
+            hour = (e.get("hour") or "").lower()
+            if not sym:
+                continue
+            if date == today and hour in ("bmo", "dmh", ""):
+                result.add(sym)
+            elif date == dt_yest and hour == "amc":
+                result.add(sym)
+        return result
+    except Exception:
+        return set()
+
+def get_earnings_upcoming(today: str, symbols: list, days: int = 5) -> dict:
+    """Return {sym: "YYYY-MM-DD"} for watchlist symbols with earnings in
+    the next `days` calendar days (inclusive of today).
+    """
+    try:
+        dt_today = datetime.strptime(today, "%Y-%m-%d").date()
+        to_date  = (dt_today + timedelta(days=days)).strftime("%Y-%m-%d")
+        entries  = _fetch_earnings_calendar(today, to_date)
+        sym_set  = {s.upper() for s in symbols}
+        result   = {}
+        for e in entries:
+            sym  = (e.get("symbol") or "").upper()
+            date = e.get("date", "")
+            if sym in sym_set and date and sym not in result:
+                result[sym] = date   # keep earliest date per symbol
+        return result
+    except Exception:
+        return {}
+
 def get_stock_atr(sym: str, price: float) -> float:
     """
     STRATEGY-5: Compute a server-side 14-period ATR from Finnhub daily candles.
@@ -1079,6 +1150,10 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
     day_changes = {sym: float(q["dp"]) for sym, q in _quotes.items()
                    if q.get("dp") is not None}
 
+    # Earnings calendar: symbols reporting today (BMO/DMH) or yesterday AMC.
+    # Used by execute_decisions to bypass the B1 gap-up gate for earnings moves.
+    earnings_today = get_earnings_today(state.get("_today", ""))
+
     # Fetch news (also parallelised inside get_news_for_items via cache; runs
     # after price fetch so the cache is warm for any overlapping calls).
     news_data = get_news_for_items(stock_items, 3)
@@ -1268,7 +1343,8 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
 
         executed = execute_decisions(decisions, state, session, prices, atr_est,
                                      provider=provider, account_ctx=account_ctx,
-                                     day_changes=day_changes)
+                                     day_changes=day_changes,
+                                     earnings_today=earnings_today)
 
         _logger.info("[%s/%s] ── EXECUTION RESULTS (%d) ──────────────────",
                      provider, session, len(executed))
@@ -1962,6 +2038,11 @@ def dispatch(action: str, data: dict):
         return get_single_quote(data["symbol"], data.get("type", "stock"))
     if action == "getNews":
         return get_news_for_items(data["items"], data.get("limit", 5))
+    if action == "getEarnings":
+        today    = datetime.now(_ET).strftime("%Y-%m-%d")
+        symbols  = [s["symbol"] for s in (data.get("stocks") or [])
+                    if s.get("type") == "stock"]
+        return get_earnings_upcoming(today, symbols, days=5)
 
     # AI analysis (free-form)
     if action == "analyzeStock":
