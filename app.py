@@ -448,8 +448,9 @@ def get_stock_quote(sym: str) -> dict:
             _logging.getLogger("quant.data").warning(
                 "%s: Finnhub c=0 (market closed or API glitch) — "
                 "using prev_close=%.2f; stop checks may be stale", sym, pc_price)
-        res = {"c": dp, "d": q.get("d"), "dp": q.get("dp"),
-               "h": q.get("h"), "l": q.get("l"), "o": q.get("o"), "pc": q.get("pc"),
+        res = {"c": dp, "d": q.get("d") or 0.0, "dp": q.get("dp") or 0.0,
+               "h": q.get("h") or 0.0, "l": q.get("l") or 0.0,
+               "o": q.get("o") or 0.0, "pc": q.get("pc") or 0.0,
                # STRATEGY-1: include current-day volume so watchlist text can show
                # Vol for the AI's ② volume condition check (was missing before)
                "v": q.get("v", 0),
