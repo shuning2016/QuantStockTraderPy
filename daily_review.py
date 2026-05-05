@@ -133,30 +133,24 @@ def _count_score_lines(ai_text: str) -> int:
     """Count scored stock lines in the AI SCORE output section.
 
     FIX-2: single combined regex handles all bullet styles and bullet-less lines.
-    The |[↑↓→] anchor is the key discriminator — it matches the pipe-delimited
-    SCORE format (SYM|direction|C:X/10|...) without false-positives on prose
-    ticker mentions, since '|↑' / '|↓' / '|→' is never used in free text.
-    The bullet group is optional (?: ... )? so models that omit it are still counted.
+    FIX-3: second alternative catches markdown table rows — when the watchlist is
+    large the AI sometimes switches to a table layout (| AAPL | ❌ | ... |) even
+    though the prompt forbids it.  The table-row pattern `| SYM |` is safe because
+    the header row uses Chinese (標的, not A-Z) and the separator row (|---|) has
+    no uppercase letter.
 
-    Matches (with any leading whitespace):
-      ▸ AAPL|↑|...    (preferred — prompt template)
-      - AAPL|↑|...    (Grok variant)
-      • NVDA|↑|...
-      * MSFT|↓|...
-      > SPY|→|...
-      → TSLA|↑|...
-      AMZN|↑|...      (no bullet — some models skip the prefix entirely)
-
-    Also handles dot-tickers (BRK.B, BF.A) from the earlier BUG-3 fix.
+    Matches:
+      ▸ AAPL|↑|...    pipe-delimited (preferred — prompt template)
+      - AAPL|↑|...    Grok bullet variant
+      AMZN|↑|...      no bullet
+      | AAPL | ...    markdown table row (fallback for large watchlists)
     """
-    # Direction field alternatives used by real AI outputs:
-    #   ↑ ↓ →  (the three preferred arrows)
-    #   =  -   (some models use equals or dash for neutral/sideways)
-    #   N/A    (rare; some models write "N/A" when uncertain)
-    # We match the pipe + any non-whitespace char sequence that isn't a number
-    # (to avoid matching position-eval lines like ▸ SYM|+2.5%|...).
     return len(re.findall(
-        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|\s*[↑↓→=\-]',
+        r'(?:'
+        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|\s*[↑↓→=\-]'  # pipe-delimited SCORE
+        r'|'
+        r'^\s*\|\s*[A-Z][A-Z0-9.]{0,5}\s*\|'                               # markdown table row
+        r')',
         ai_text, re.MULTILINE,
     ))
 

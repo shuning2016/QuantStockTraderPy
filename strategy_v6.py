@@ -934,7 +934,8 @@ _COMMON = ("风控: 仓位=净值×1.5%÷(1.5×ATR)|止损=Entry-1.5×ATR|硬止
            # BUG-3: trailing multipliers updated to 2.0/1.5 — prompt kept in sync
            "追踪: C≥8盈≥0.75R/C<8盈≥0.5R开始追踪|盈≥1R→最高价-2.0ATR|盈≥2R→最高价-1.5ATR|禁扩止损/禁摊平\n"
            "置信度: ≥6入场 <6观望|三要素①趋势②Breakout放量③P(up)>0.6\n")
-_SCORE  = ("▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
+_SCORE  = ("【每只股票必须单独一行，严格使用以下竖线格式，禁止使用表格或其他格式】\n"
+           "▸ SYM|↑↓→|C:X/10|①趋势Y/N ②量价(Vol:Xm/20d:Ym/Ratio:Z×)Y/N ③P(up)=0.X\n"
            # Concrete example — helps models understand the exact pipe format required.
            # Not parsed by the check (appears in prompt, not AI response).
            "  例: ▸ NVDA|↑|C:7/10|①趋势Y ②量价(Vol:52m/20d:38m/Ratio:1.4×)Y ③P(up)=0.72\n")
