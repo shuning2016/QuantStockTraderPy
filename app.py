@@ -1087,19 +1087,7 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
     stocks = load_watchlist()
     all_stock_items = [s for s in stocks if s.get("type") == "stock"]
 
-    # STRATEGY-3: cap the active watchlist to MAX_WATCHLIST_STOCKS.
-    # Feeding too many stocks into a single prompt overwhelms smaller models
-    # (grok-3-mini, deepseek-chat), causing them to skip most candidates and
-    # default to HOLD. Users should order their watchlist by priority; the
-    # first N entries are always analysed.
-    stock_items = all_stock_items[:CFG.MAX_WATCHLIST_STOCKS]
-    if len(all_stock_items) > CFG.MAX_WATCHLIST_STOCKS:
-        _logging.getLogger("quant.session").info(
-            "[%s/%s] Watchlist capped: %d → %d stocks (MAX_WATCHLIST_STOCKS=%d). "
-            "Reorder watchlist in UI to prioritise different stocks.",
-            provider, session,
-            len(all_stock_items), len(stock_items), CFG.MAX_WATCHLIST_STOCKS,
-        )
+    stock_items = all_stock_items
 
     # Guard: abort early if watchlist is empty so we never send a blank prompt.
     # Root cause is usually a Vercel cold start wiping /tmp before KV was set up —
@@ -1490,7 +1478,6 @@ def api_daily_review(date: str = None):
             read_log_fn          = read_log_range,
             load_state_fn        = load_trade_state,
             watchlist            = load_watchlist(),
-            max_watchlist_stocks = CFG.MAX_WATCHLIST_STOCKS,
         )
 
         # Optional plain-text mode for easy terminal reading

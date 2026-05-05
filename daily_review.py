@@ -686,7 +686,6 @@ def run_daily_review(
     read_log_fn: Callable,
     load_state_fn: Callable,
     watchlist: list,
-    max_watchlist_stocks: int = 6,
 ) -> dict:
     """
     Run all 10 execution health checks for a given trading date.
@@ -696,9 +695,6 @@ def run_daily_review(
         read_log_fn          : read_log_range(prefix, from, to, provider=None) → list
         load_state_fn        : load_trade_state(provider) → dict
         watchlist            : current watchlist list (to know expected stock count)
-        max_watchlist_stocks : CFG.MAX_WATCHLIST_STOCKS — cap for CHK-2 expected count.
-                               BUG-1 fix: passed in rather than imported inside the
-                               function body, removing the runtime strategy_v6 dependency.
 
     Returns a dict with:
         "date"        : date checked
@@ -727,9 +723,7 @@ def run_daily_review(
             logger.warning("Could not load state for %s: %s", prov, e)
             states[prov] = {}
 
-    # Expected number of stocks capped by the watchlist limit
-    stock_count     = len([s for s in watchlist if s.get("type") == "stock"])
-    expected_stocks = min(stock_count, max_watchlist_stocks)
+    expected_stocks = len([s for s in watchlist if s.get("type") == "stock"])
 
     # ── Run all 10 checks ────────────────────────────────────────
     checks = [

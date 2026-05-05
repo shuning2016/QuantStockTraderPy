@@ -63,8 +63,6 @@ class CFG:
     # None for conf<6, silently skipping the cap and allowing unlimited stop size).
     CONF_MAX_STOP_PCT    = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0,
                             6: 1.5, 7: 2.0, 8: 2.5, 9: 3.0}
-    MAX_WATCHLIST_STOCKS = 6       # STRATEGY-3: cap AI input to 6 stocks to reduce cognitive
-                                   # load and prevent truncated responses on mini models
 
 
 # ─── Per-provider behaviour overrides ─────────────────────────────
