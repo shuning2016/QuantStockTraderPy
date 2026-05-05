@@ -1374,7 +1374,7 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                 "symbol":     d.get("symbol"),
                 "shares":     d.get("shares"),
                 "parse_mode": d.get("parse_mode", "structured"),
-                "detail":     f"Decision parsed but blocked by position rules or session rules",
+                "detail":     f"⚠️ {d.get('action','?')}|{d.get('symbol','?')} — 决策已解析但被规则拦截（仓位/session限制）",
             })
 
     # If an AI error prevented parsing, record that clearly (separate from "hold" case)
