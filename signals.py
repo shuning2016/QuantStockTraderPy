@@ -538,7 +538,7 @@ def refresh_signals(
 
     Args:
         watchlist:   list of stock symbols from load_watchlist()
-        config:      signal_config dict {"politicians": [...], "ark_funds": [...]}
+        config:      signal_config dict {"politicians": [...], "ark_funds": [...], "fund_managers": [...]}
         prev_cache:  previous signal_cache (used for ARK yesterday-holdings diff)
                      Pass {} on first run.
         quiver_key:  Quiver Quantitative API key
@@ -555,6 +555,7 @@ def refresh_signals(
     stock_symbols = [s for s in watchlist if isinstance(s, str)]
     politicians   = config.get("politicians", [])
     ark_funds     = config.get("ark_funds", [])
+    fund_managers = config.get("fund_managers", [])
     prev_ark      = prev_cache.get("ark_holdings", {})
 
     watchlist_signals: dict[str, list[dict]] = {}
@@ -599,18 +600,31 @@ def refresh_signals(
         logger.error("refresh_signals: ARK fetch failed: %s", e)
         partial = True
 
-    # ── Drop signals older than 30 days ───────────────────────────
+    # ── Fund manager 13F signals ──────────────────────────────────
+    try:
+        mgr_wl, mgr_untracked = fetch_fund_manager_signals(
+            managers=fund_managers,
+            watchlist=stock_symbols,
+        )
+        for sym, sigs in mgr_wl.items():
+            watchlist_signals.setdefault(sym, []).extend(sigs)
+        untracked_signals.extend(mgr_untracked)
+    except Exception as e:
+        logger.error("refresh_signals: fund manager fetch failed: %s", e)
+        partial = True
+
+    # ── Drop non-manager signals older than 30 days ───────────────
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
     for sym in list(watchlist_signals):
         watchlist_signals[sym] = [
             s for s in watchlist_signals[sym]
-            if (s.get("date") or "9999") >= cutoff
+            if s.get("type") == "manager" or (s.get("date") or "9999") >= cutoff
         ]
         if not watchlist_signals[sym]:
             del watchlist_signals[sym]
     untracked_signals = [
         s for s in untracked_signals
-        if (s.get("date") or "9999") >= cutoff
+        if s.get("type") == "manager" or (s.get("date") or "9999") >= cutoff
     ]
 
     return {

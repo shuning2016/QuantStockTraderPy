@@ -512,3 +512,32 @@ def test_fetch_fund_manager_signals_only_one_13f_returns_empty(monkeypatch):
     wl, untracked = signals.fetch_fund_manager_signals(managers=["Bill Ackman"], watchlist=[])
     assert wl == {}
     assert untracked == []
+
+
+def test_refresh_signals_includes_fund_manager_signals(monkeypatch):
+    monkeypatch.setattr(signals, "fetch_insider_trades",
+                        lambda syms: {})
+    monkeypatch.setattr(signals, "fetch_politician_trades",
+                        lambda politicians, watchlist, quiver_key: ({}, []))
+    monkeypatch.setattr(signals, "fetch_ark_trades",
+                        lambda funds, watchlist, prev_ark_holdings=None: ({}, [], {}))
+    monkeypatch.setattr(signals, "fetch_fund_manager_signals",
+                        lambda managers, watchlist: (
+                            {},
+                            [{"type": "manager", "who": "Bill Ackman",
+                              "fund": "Pershing Square", "action": "new",
+                              "shares": 1_000_000, "pct_change": 100.0,
+                              "issuer": "SOME CO", "cusip": "FAKECUSIP",
+                              "date": "2026-02-17", "quarter": "Q4 2025", "sym": ""}]
+                        ))
+
+    result = signals.refresh_signals(
+        watchlist=["NVDA"],
+        config={"politicians": [], "ark_funds": [], "fund_managers": ["Bill Ackman"]},
+        prev_cache={},
+        quiver_key="",
+    )
+
+    manager_sigs = [s for s in result["untracked_signals"] if s["type"] == "manager"]
+    assert len(manager_sigs) == 1
+    assert manager_sigs[0]["who"] == "Bill Ackman"
