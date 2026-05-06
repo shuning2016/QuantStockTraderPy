@@ -289,3 +289,98 @@ def fetch_ark_trades(
         time.sleep(0.5)  # be polite between fund downloads
 
     return watchlist_matches, untracked_list, today_holdings
+
+
+def refresh_signals(
+    watchlist: list[str],
+    config: dict,
+    prev_cache: dict,
+    quiver_key: str = "",
+) -> dict:
+    """
+    Fetch all signal types and return a fresh signal_cache dict.
+
+    Args:
+        watchlist:   list of stock symbols from load_watchlist()
+        config:      signal_config dict {"politicians": [...], "ark_funds": [...]}
+        prev_cache:  previous signal_cache (used for ARK yesterday-holdings diff)
+                     Pass {} on first run.
+        quiver_key:  Quiver Quantitative API key
+
+    Returns signal_cache dict:
+        {
+          "fetched_at":       ISO timestamp str,
+          "partial":          bool (True if any source failed),
+          "watchlist_signals": {sym: [signal, ...]},
+          "untracked_signals": [signal, ...],
+          "ark_holdings":      {fund: {ticker: shares}},  # saved for next diff
+        }
+    """
+    stock_symbols = [s for s in watchlist if isinstance(s, str)]
+    politicians   = config.get("politicians", [])
+    ark_funds     = config.get("ark_funds", [])
+    prev_ark      = prev_cache.get("ark_holdings", {})
+
+    watchlist_signals: dict[str, list[dict]] = {}
+    untracked_signals: list[dict]            = []
+    partial = False
+
+    # ── Insider trades ────────────────────────────────────────────
+    try:
+        insider_map = fetch_insider_trades(stock_symbols)
+        for sym, sigs in insider_map.items():
+            watchlist_signals.setdefault(sym, []).extend(sigs)
+    except Exception as e:
+        logger.error("refresh_signals: insider fetch failed: %s", e)
+        partial = True
+
+    # ── Politician trades ─────────────────────────────────────────
+    try:
+        pol_wl, pol_untracked = fetch_politician_trades(
+            politicians=politicians,
+            watchlist=stock_symbols,
+            quiver_key=quiver_key,
+        )
+        for sym, sigs in pol_wl.items():
+            watchlist_signals.setdefault(sym, []).extend(sigs)
+        untracked_signals.extend(pol_untracked)
+    except Exception as e:
+        logger.error("refresh_signals: politician fetch failed: %s", e)
+        partial = True
+
+    # ── ARK trades ────────────────────────────────────────────────
+    today_holdings: dict[str, dict[str, int]] = {}
+    try:
+        ark_wl, ark_untracked, today_holdings = fetch_ark_trades(
+            funds=ark_funds,
+            watchlist=stock_symbols,
+            prev_ark_holdings=prev_ark,
+        )
+        for sym, sigs in ark_wl.items():
+            watchlist_signals.setdefault(sym, []).extend(sigs)
+        untracked_signals.extend(ark_untracked)
+    except Exception as e:
+        logger.error("refresh_signals: ARK fetch failed: %s", e)
+        partial = True
+
+    # ── Drop signals older than 30 days ───────────────────────────
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    for sym in list(watchlist_signals):
+        watchlist_signals[sym] = [
+            s for s in watchlist_signals[sym]
+            if (s.get("date") or "9999") >= cutoff
+        ]
+        if not watchlist_signals[sym]:
+            del watchlist_signals[sym]
+    untracked_signals = [
+        s for s in untracked_signals
+        if (s.get("date") or "9999") >= cutoff
+    ]
+
+    return {
+        "fetched_at":        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "partial":           partial,
+        "watchlist_signals": watchlist_signals,
+        "untracked_signals": untracked_signals,
+        "ark_holdings":      today_holdings,
+    }

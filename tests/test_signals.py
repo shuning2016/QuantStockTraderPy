@@ -179,3 +179,56 @@ def test_fetch_ark_trades_skips_unknown_fund(monkeypatch):
     )
     assert wl == {}
     assert today_h == {}
+
+
+# ── refresh_signals orchestrator tests ────────────────────────────────────────
+
+def test_refresh_signals_merges_all_sources(monkeypatch):
+    monkeypatch.setattr(signals, "fetch_insider_trades",
+                        lambda syms: {"NVDA": [{"type": "insider", "date": "2026-05-01",
+                                                 "action": "buy", "amount": 2_000_000,
+                                                 "shares": 10_000, "who": "CEO", "role": "CEO",
+                                                 "filing_date": "2026-05-03", "is_plan": False}]})
+    monkeypatch.setattr(signals, "fetch_politician_trades",
+                        lambda politicians, watchlist, quiver_key:
+                            ({"NVDA": [{"type": "politician", "date": "2026-05-02",
+                                         "action": "buy", "amount_range": "$500K-$1M",
+                                         "who": "Pelosi", "role": "D-CA", "sym": "NVDA"}]},
+                             [{"type": "politician", "sym": "TSM", "date": "2026-05-03",
+                               "action": "buy", "amount_range": "$1M-$5M",
+                               "who": "Pelosi", "role": "D-CA"}]))
+    monkeypatch.setattr(signals, "fetch_ark_trades",
+                        lambda funds, watchlist, prev_ark_holdings:
+                            ({}, [], {}))
+
+    result = signals.refresh_signals(
+        watchlist=["NVDA", "AAPL"],
+        config={"politicians": ["Nancy Pelosi"], "ark_funds": ["ARKK"]},
+        prev_cache={},
+        quiver_key="testkey",
+    )
+
+    assert "fetched_at" in result
+    assert result["partial"] is False
+    # NVDA should have both insider + politician signals merged
+    assert len(result["watchlist_signals"]["NVDA"]) == 2
+    # TSM is untracked
+    assert any(s["sym"] == "TSM" for s in result["untracked_signals"])
+
+
+def test_refresh_signals_partial_on_failure(monkeypatch):
+    def bad_fetch(syms):
+        raise RuntimeError("network error")
+    monkeypatch.setattr(signals, "fetch_insider_trades", bad_fetch)
+    monkeypatch.setattr(signals, "fetch_politician_trades",
+                        lambda politicians, watchlist, quiver_key: ({}, []))
+    monkeypatch.setattr(signals, "fetch_ark_trades",
+                        lambda funds, watchlist, prev_ark_holdings: ({}, [], {}))
+
+    result = signals.refresh_signals(
+        watchlist=["NVDA"],
+        config={},
+        prev_cache={},
+        quiver_key="",
+    )
+    assert result["partial"] is True
