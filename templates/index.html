@@ -101,6 +101,24 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .q-chg{font-size:14px;font-weight:600}
 .q-chg.up{color:var(--red)}.q-chg.down{color:var(--green)}.q-chg.flat{color:var(--t3)}
 .q-tag{font-size:11px;color:var(--t3);background:var(--bg);padding:2px 7px;border-radius:4px}
+.sig-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sig-dot.insider{background:#f59e0b}
+.sig-dot.politician{background:#a855f7}
+.sig-dot.ark{background:#22c55e}
+.sig-dots{display:flex;gap:2px;align-items:center}
+.sig-panel{border-top:1px solid var(--bdr);padding-top:10px;margin-top:10px}
+.sig-panel-title{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.sig-row{padding:7px 10px;border-radius:0 6px 6px 0;margin-bottom:5px;font-size:12px;line-height:1.5}
+.sig-row.insider{background:var(--amber-l,#fffbeb);border-left:3px solid #f59e0b}
+.sig-row.politician{background:var(--purple-l,#fdf4ff);border-left:3px solid #a855f7}
+.sig-row.ark{background:var(--green-l,#f0fdf4);border-left:3px solid #22c55e}
+.sig-row-who{font-weight:600;font-size:11px}
+.sig-row-who.insider{color:#b45309}
+.sig-row-who.politician{color:#7e22ce}
+.sig-row-who.ark{color:#15803d}
+.sig-action-badge{font-size:10px;font-weight:700;padding:0 5px;border-radius:3px;margin-left:5px}
+.sig-action-badge.buy{background:#dcfce7;color:#15803d}
+.sig-action-badge.sell{background:#fee2e2;color:#991b1b}
 .q-meta{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}
 .qstat{display:flex;flex-direction:column;align-items:center}
 .qstat-l{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.3px}
@@ -354,6 +372,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="tab active" id="tab-news"     onclick="switchTab('news')">行情 &amp; 新闻</div>
       <div class="tab"        id="tab-trade"    onclick="switchTab('trade')">模拟交易</div>
       <div class="tab"        id="tab-messages" onclick="switchTab('messages')">交易记录</div>
+      <div class="tab"        id="tab-signals"  onclick="switchTab('signals')">📡 信号追踪</div>
       <div class="tab"        id="tab-daily"    onclick="switchTab('daily')">📋 日检</div>
       <div class="tab"        id="tab-weekly"   onclick="switchTab('weekly')">周报 &amp; 建议</div>
       <div class="tab"        id="tab-guardian" onclick="switchTab('guardian')">🛡️ 心跳</div>
@@ -395,6 +414,47 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
           <span class="wr-meta-txt" id="suggest-meta">周六 12:00 ET 自动运行 · 扫描板块新闻推荐下周观察名单</span>
         </div>
         <div id="suggest-content"><div class="empty-panel">点击「立即生成选股建议」或等待周六自动运行</div></div>
+      </div>
+    </div>
+
+    <!-- Signals panel -->
+    <div id="panel-signals" style="display:none">
+      <div class="wr-sub-tabs">
+        <button class="wr-sub-btn active" id="sigtab-settings"  onclick="switchSigTab('settings')">⚙️ 设置</button>
+        <button class="wr-sub-btn"        id="sigtab-untracked" onclick="switchSigTab('untracked')">🔔 未追踪信号 <span id="sig-untracked-count" style="display:none;background:#ef4444;color:#fff;border-radius:8px;padding:0 5px;font-size:10px;margin-left:3px"></span></button>
+        <button class="wr-sub-btn"        id="sigtab-all"       onclick="switchSigTab('all')">📋 全部信号</button>
+      </div>
+
+      <!-- Settings sub-panel -->
+      <div id="sigpanel-settings">
+        <div style="background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:14px;margin-bottom:10px">
+          <div class="ts-label" style="margin-bottom:8px">🏛️ 关注的政客</div>
+          <div id="pol-tags" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px"></div>
+          <div style="display:flex;gap:6px">
+            <input id="pol-inp" type="text" placeholder="输入政客名字，回车添加…"
+                   style="border:1px solid var(--bdr);border-radius:6px;padding:5px 10px;font-size:12px;background:var(--card);color:var(--t);flex:1"
+                   onkeydown="if(event.key==='Enter')addPolitician()">
+            <button class="btn btn-sm btn-o" onclick="addPolitician()">添加</button>
+          </div>
+        </div>
+        <div style="background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:14px;margin-bottom:10px">
+          <div class="ts-label" style="margin-bottom:8px">🦆 关注的 ARK 基金</div>
+          <div id="ark-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        </div>
+        <div class="wr-run-bar">
+          <button class="btn btn-sm btn-p" onclick="triggerRefreshSignals()" id="btn-refresh-signals">🔄 立即刷新信号</button>
+          <span class="wr-meta-txt" id="sig-meta">每周一至五 09:00 ET 自动运行</span>
+        </div>
+      </div>
+
+      <!-- Untracked sub-panel -->
+      <div id="sigpanel-untracked" style="display:none">
+        <div id="sig-untracked-list"><div class="empty-panel">暂无未追踪信号 — 运行刷新后显示</div></div>
+      </div>
+
+      <!-- All signals sub-panel -->
+      <div id="sigpanel-all" style="display:none">
+        <div id="sig-all-list"><div class="empty-panel">暂无信号数据 — 运行刷新后显示</div></div>
       </div>
     </div>
 
@@ -535,6 +595,8 @@ const itemKey=(sym,type)=>sym+':'+type;
 //  WATCHLIST
 // ═══════════════════════════════════════════════════════════════
 let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={}, earningsCache={};
+let signalCache={watchlist_signals:{},untracked_signals:[],fetched_at:'',partial:false};
+let signalConfig={politicians:[],ark_funds:[]};
 
 async function loadStocks(){
   // Priority 1: localStorage (instant, survives Vercel cold starts)
@@ -567,6 +629,44 @@ async function loadStocks(){
     }
   }catch(e){}
 }
+function buildSignalPanel(sym){
+  const sigs=(signalCache.watchlist_signals||{})[sym.toUpperCase()];
+  if(!sigs||!sigs.length)return'';
+  const rows=sigs.map(s=>{
+    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
+    let detail='';
+    if(s.type==='insider'){
+      const amt=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:'';
+      detail=`${s.shares?s.shares.toLocaleString()+'股':''} ${amt}`.trim();
+    }else if(s.type==='politician'){
+      detail=s.amount_range||'';
+    }else if(s.type==='ark'){
+      detail=s.shares?s.shares.toLocaleString()+'股 净变动':'';
+    }
+    return`<div class="sig-row ${s.type}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span class="sig-row-who ${s.type}">${s.type==='insider'?'🏦 ':s.type==='politician'?'🏛️ ':'🦆 '}${esc(s.who||s.fund||'')}${s.role?` · ${esc(s.role)}`:''}${badge}</span>
+        <span style="font-size:10px;color:var(--t3)">${s.date||''}</span>
+      </div>
+      ${detail?`<div style="margin-top:2px;color:var(--t2)">${esc(detail)}</div>`:''}
+    </div>`;
+  }).join('');
+  return`<div class="sig-panel"><div class="sig-panel-title">📡 信号追踪</div>${rows}</div>`;
+}
+
+async function loadSignalData(){
+  try{
+    const[cache,cfg]=await Promise.all([
+      api('getSignalCache'),
+      api('getSignalConfig'),
+    ]);
+    if(cache&&typeof cache==='object'){signalCache=cache;}
+    if(cfg&&typeof cfg==='object'){signalConfig=cfg;}
+    renderLists();
+    renderSignalBadgeCount();
+  }catch(e){}
+}
+
 async function addItem(type){
   const id=type==='stock'?'stock-inp':'crypto-inp';
   const sym=document.getElementById(id).value.trim().toUpperCase();
@@ -600,11 +700,25 @@ function renderOneList(type){
   if(!sub.length){el.innerHTML=`<div class="empty-sm">暂无${type==='stock'?'股票':'Coin'}</div>`;return;}
   el.innerHTML=sub.map(s=>{
     const key=itemKey(s.symbol,s.type),act=activeKey===key?' active':'';
+    const dots=buildSigDots(s.symbol,s.type);
     return`<div class="item-row${type==='crypto'?' crypto':''}${act}" onclick="setActive('${key}')">
       <span class="isym${type==='crypto'?' crypto':''}">${s.symbol}</span>
+      ${dots?`<div class="sig-dots">${dots}</div>`:''}
       <button class="del-btn" onclick="event.stopPropagation();deleteItem('${s.symbol}','${type}')">×</button>
     </div>`;
   }).join('');
+}
+
+function buildSigDots(sym,type){
+  if(type!=='stock')return'';
+  const sigs=(signalCache.watchlist_signals||{})[sym.toUpperCase()]||[];
+  if(!sigs.length)return'';
+  const types=new Set(sigs.map(s=>s.type));
+  let dots='';
+  if(types.has('insider'))   dots+=`<span class="sig-dot insider"   title="内部人士信号"></span>`;
+  if(types.has('politician'))dots+=`<span class="sig-dot politician" title="政客信号"></span>`;
+  if(types.has('ark'))       dots+=`<span class="sig-dot ark"        title="ARK信号"></span>`;
+  return dots;
 }
 function renderChips(){
   const el=document.getElementById('chip-row');
@@ -670,7 +784,8 @@ function buildCard(item,loading){
         <div class="ai-txt">${esc(cachedAI.text)}</div>
       </div></div>`
     : `<div id="ai-wrap-${key}" class="ai-wrap" style="display:none"></div>`;
-  return`<div class="qcard${ic?' crypto':''}" id="card-${key}">${qHead}<div class="qcard-actions"><button class="btn btn-p btn-sm" onclick="queryItem('${item.symbol}','${item.type}')" id="qbtn-${key}">🔍 查询行情 &amp; 新闻</button><button class="ai-btn" onclick="analyzeItem('${item.symbol}','${item.type}')" id="ai-btn-${key}">🤖 AI 分析</button></div>${aiHtml}${newsHtml}</div>`;
+  const sigHtml=!ic?buildSignalPanel(item.symbol):'';
+  return`<div class="qcard${ic?' crypto':''}" id="card-${key}">${qHead}<div class="qcard-actions"><button class="btn btn-p btn-sm" onclick="queryItem('${item.symbol}','${item.type}')" id="qbtn-${key}">🔍 查询行情 &amp; 新闻</button><button class="ai-btn" onclick="analyzeItem('${item.symbol}','${item.type}')" id="ai-btn-${key}">🤖 AI 分析</button></div>${aiHtml}${newsHtml}${sigHtml}</div>`;
 }
 async function queryItem(sym,type){
   const key=itemKey(sym,type),btn=document.getElementById('qbtn-'+key);
@@ -715,7 +830,7 @@ async function analyzeItem(sym,type){
 // ═══════════════════════════════════════════════════════════════
 let _currentLogTab='sessions', _tradeTimer=null, _gdTimer=null;
 function switchTab(n){
-  ['news','trade','messages','daily','weekly','guardian'].forEach(t=>{
+  ['news','trade','messages','signals','daily','weekly','guardian'].forEach(t=>{
     document.getElementById('panel-'+t).style.display=t===n?'':'none';
     document.getElementById('tab-'+t).className='tab'+(t===n?' active':'');
   });
@@ -740,6 +855,159 @@ function switchTab(n){
     loadGuardianHeartbeats();
     _gdTimer=setInterval(loadGuardianHeartbeats,60*1000);
   }
+  if(n==='signals'){
+    renderSigSettings();
+    renderSigUntracked();
+    renderSigAll();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SIGNAL TRACKING TAB
+// ═══════════════════════════════════════════════════════════════
+const ARK_ALL_FUNDS=['ARKK','ARKW','ARKQ','ARKG','ARKF','ARKX'];
+
+function switchSigTab(n){
+  ['settings','untracked','all'].forEach(t=>{
+    document.getElementById('sigpanel-'+t).style.display=t===n?'':'none';
+    document.getElementById('sigtab-'+t).className='wr-sub-btn'+(t===n?' active':'');
+  });
+}
+
+function renderSignalBadgeCount(){
+  const n=(signalCache.untracked_signals||[]).length;
+  const el=document.getElementById('sig-untracked-count');
+  if(!el)return;
+  if(n>0){el.textContent=n;el.style.display='';}else{el.style.display='none';}
+}
+
+function renderSigSettings(){
+  const polEl=document.getElementById('pol-tags');
+  if(polEl){
+    const pols=signalConfig.politicians||[];
+    polEl.innerHTML=pols.map(p=>
+      `<span style="background:var(--blue-l,#dbeafe);color:var(--blue,#1d4ed8);padding:3px 10px;border-radius:12px;font-size:12px;cursor:pointer"
+             onclick="removePolitician('${esc(p)}')">${esc(p)} <span style="opacity:.6">×</span></span>`
+    ).join('');
+  }
+  const arkEl=document.getElementById('ark-chips');
+  if(arkEl){
+    const sel=new Set(signalConfig.ark_funds||[]);
+    arkEl.innerHTML=ARK_ALL_FUNDS.map(f=>{
+      const on=sel.has(f);
+      return`<span style="padding:3px 12px;border-radius:12px;font-size:12px;cursor:pointer;
+                         background:${on?'#dcfce7':'var(--bg)'};
+                         color:${on?'#15803d':'var(--t3)'};
+                         border:1px solid ${on?'#22c55e':'var(--bdr)'}"
+                   onclick="toggleArk('${f}')">${on?'✓ ':''}${f}</span>`;
+    }).join('');
+  }
+  const metaEl=document.getElementById('sig-meta');
+  if(metaEl&&signalCache.fetched_at){
+    metaEl.textContent=`上次更新: ${signalCache.fetched_at.replace('T',' ')} UTC · 每周一至五 09:00 ET 自动运行`+
+      (signalCache.partial?' ⚠️ 部分数据':'');
+  }
+}
+
+function renderSigUntracked(){
+  const el=document.getElementById('sig-untracked-list');
+  if(!el)return;
+  const list=signalCache.untracked_signals||[];
+  if(!list.length){el.innerHTML='<div class="empty-panel">暂无未追踪信号</div>';return;}
+  el.innerHTML=list.map(s=>{
+    const typeBg=s.type==='insider'?'#fffbeb':s.type==='politician'?'#fdf4ff':'#f0fdf4';
+    const typeColor=s.type==='insider'?'#b45309':s.type==='politician'?'#7e22ce':'#15803d';
+    const typeLabel=s.type==='insider'?'🏦 Insider':s.type==='politician'?'🏛️ '+esc(s.who||''):'🦆 '+esc(s.fund||'');
+    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
+    const detail=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:s.amount_range||(s.shares?s.shares.toLocaleString()+'股':'');
+    return`<div style="display:flex;align-items:center;justify-content:space-between;
+                       padding:9px 10px;background:var(--card);border:1px solid var(--bdr);
+                       border-radius:6px;margin-bottom:5px;font-size:12px">
+      <div>
+        <span style="font-weight:700;color:var(--blue)">${esc(s.sym)}</span>
+        <span style="background:${typeBg};color:${typeColor};font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px">${typeLabel}</span>
+        ${badge}
+        <span style="margin-left:8px;color:var(--t2)">${esc(detail)} · ${s.date||''}</span>
+      </div>
+      <button class="btn btn-sm btn-o" onclick="addFromSignal('${esc(s.sym)}')">+ Watchlist</button>
+    </div>`;
+  }).join('');
+}
+
+function renderSigAll(){
+  const el=document.getElementById('sig-all-list');
+  if(!el)return;
+  const wl=signalCache.watchlist_signals||{};
+  const all=Object.entries(wl).flatMap(([sym,sigs])=>sigs.map(s=>({...s,sym})));
+  all.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  if(!all.length){el.innerHTML='<div class="empty-panel">暂无信号数据</div>';return;}
+  el.innerHTML=all.map(s=>{
+    const typeLabel=s.type==='insider'?'🏦 '+esc(s.who||''):s.type==='politician'?'🏛️ '+esc(s.who||''):'🦆 '+esc(s.fund||'');
+    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
+    const detail=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:s.amount_range||(s.shares?s.shares.toLocaleString()+'股':'');
+    return`<div style="padding:8px 10px;background:var(--card);border:1px solid var(--bdr);
+                       border-radius:6px;margin-bottom:5px;font-size:12px;display:flex;
+                       justify-content:space-between;align-items:center">
+      <div>
+        <span style="font-weight:700;color:var(--blue)">${esc(s.sym)}</span>
+        <span style="margin-left:8px;color:var(--t2)">${typeLabel}</span>
+        ${badge}
+        <span style="margin-left:6px;color:var(--t3)">${esc(detail)} · ${s.date||''}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function addPolitician(){
+  const inp=document.getElementById('pol-inp');
+  const name=(inp.value||'').trim();
+  if(!name)return;
+  const pols=signalConfig.politicians||[];
+  if(pols.includes(name)){toast('已在列表中','err');return;}
+  signalConfig.politicians=[...pols,name];
+  inp.value='';
+  saveSigConfig();
+  renderSigSettings();
+}
+function removePolitician(name){
+  signalConfig.politicians=(signalConfig.politicians||[]).filter(p=>p!==name);
+  saveSigConfig();
+  renderSigSettings();
+}
+function toggleArk(fund){
+  const sel=new Set(signalConfig.ark_funds||[]);
+  if(sel.has(fund))sel.delete(fund);else sel.add(fund);
+  signalConfig.ark_funds=[...sel];
+  saveSigConfig();
+  renderSigSettings();
+}
+async function saveSigConfig(){
+  try{await api('saveSignalConfig',{config:signalConfig});}catch(e){}
+}
+async function triggerRefreshSignals(){
+  const btn=document.getElementById('btn-refresh-signals');
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="sp"></span> 刷新中…';}
+  try{
+    const cache=await api('refreshSignals');
+    if(cache&&typeof cache==='object'){
+      signalCache=cache;
+      renderLists();
+      renderSignalBadgeCount();
+      renderSigSettings();
+      renderSigUntracked();
+      renderSigAll();
+      toast('信号已刷新');
+    }
+  }catch(e){toast('刷新失败: '+e.message,'err');}
+  if(btn){btn.disabled=false;btn.innerHTML='🔄 立即刷新信号';}
+}
+async function addFromSignal(sym){
+  if(stocks.find(s=>s.symbol===sym&&s.type==='stock')){toast('已在列表中','err');return;}
+  stocks.push({symbol:sym,type:'stock'});
+  await persistStocks();
+  renderLists();renderChips();
+  toast(sym+' 已加入 Watchlist');
+  renderSigUntracked();
 }
 
 async function checkKvStatus(){
@@ -1700,6 +1968,7 @@ function renderDailyReview(data){
 
   // Load watchlist
   await loadStocks();
+  loadSignalData();
 
   // Backend health check
   try{

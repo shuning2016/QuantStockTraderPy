@@ -37,6 +37,7 @@ DEEPSEEK_KEY = _env("DEEPSEEK_KEY")  # DeepSeek             — platform.deepsee
 
 # ── Optional extras ───────────────────────────────────────────────
 SERPAPI_KEY  = _env("SERPAPI_KEY")   # SerpAPI (not currently used)
+QUIVER_KEY   = _env("QUIVER_KEY")    # Quiver Quantitative — quiverquant.com (free tier)
 PORT         = int(_env("PORT", "5000"))
 
 # ── AI model identifiers ──────────────────────────────────────────
@@ -100,4 +101,6 @@ def check_config() -> list[str]:
         warnings.append("No AI key set — set at least one of CLAUDE_KEY / GROK_KEY / DEEPSEEK_KEY")
     if not NEWSAPI_KEY:
         warnings.append("NEWSAPI_KEY not set — crypto news will be unavailable")
+    if not QUIVER_KEY:
+        warnings.append("QUIVER_KEY not set — politician trade signals will be unavailable")
     return warnings
