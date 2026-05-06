@@ -17,15 +17,11 @@ import requests
 
 logger = logging.getLogger("quant.signals")
 
-# ── ARK fund CSV URLs ─────────────────────────────────────────────────────────
-ARK_CSV_URLS: dict[str, str] = {
-    "ARKK": "https://ark-funds.com/wp-content/uploads/funds-etf-csv/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv",
-    "ARKW": "https://ark-funds.com/wp-content/uploads/funds-etf-csv/ARK_NEXT_GENERATION_INTERNET_ETF_ARKW_HOLDINGS.csv",
-    "ARKQ": "https://ark-funds.com/wp-content/uploads/funds-etf-csv/ARK_AUTONOMOUS_TECHNOLOGY_&_ROBOTICS_ETF_ARKQ_HOLDINGS.csv",
-    "ARKG": "https://ark-funds.com/wp-content/uploads/funds-etf-csv/ARK_GENOMIC_REVOLUTION_ETF_ARKG_HOLDINGS.csv",
-    "ARKF": "https://ark-funds.com/wp-content/uploads/funds-etf-csv/ARK_FINTECH_INNOVATION_ETF_ARKF_HOLDINGS.csv",
-    "ARKX": "https://ark-funds.com/wp-content/uploads/funds-etf-csv/ARK_SPACE_EXPLORATION_&_INNOVATION_ETF_ARKX_HOLDINGS.csv",
-}
+# ── ARK fund trades API (arkfunds.io) ─────────────────────────────────────────
+# Returns recent buy/sell trades per fund; avoids Cloudflare-blocked CSV URLs.
+_ARKFUNDS_TRADES_URL = "https://arkfunds.io/api/v2/etf/trades?symbol={fund}&period=5d"
+
+VALID_ARK_FUNDS = {"ARKK", "ARKW", "ARKQ", "ARKG", "ARKF", "ARKX"}
 
 # OpenInsider screener endpoint — vl=500000 filters trades >= $500K value
 # is10b5=0 excludes 10b5-1 scheduled-plan trades at source
@@ -194,91 +190,65 @@ def fetch_politician_trades(
     return watchlist_matches, untracked_list
 
 
-def _parse_ark_csv(csv_text: str) -> dict[str, int]:
-    """
-    Parse ARK holdings CSV into {ticker: shares} dict.
-
-    ARK CSV columns: date, fund, company, ticker, cusip, shares, market value ($), weight (%)
-    Returns empty dict on any parse error.
-    """
-    holdings: dict[str, int] = {}
-    try:
-        reader = csv.DictReader(io.StringIO(csv_text))
-        for row in reader:
-            ticker = (row.get("ticker") or row.get("Ticker") or "").strip().upper()
-            if not ticker:
-                continue
-            raw_shares = (row.get("shares") or row.get("Shares") or "0").replace(",", "")
-            try:
-                holdings[ticker] = int(float(raw_shares))
-            except ValueError:
-                continue
-    except Exception as e:
-        logger.warning("_parse_ark_csv failed: %s", e)
-    return holdings
-
-
 def fetch_ark_trades(
     funds: list[str],
     watchlist: list[str],
-    prev_ark_holdings: dict[str, dict[str, int]],
-) -> tuple[dict[str, list[dict]], list[dict], dict[str, dict[str, int]]]:
+    prev_ark_holdings: Optional[dict] = None,  # kept for API compat, unused
+) -> tuple[dict[str, list[dict]], list[dict], dict]:
     """
-    Download today's ARK holdings CSVs, diff vs yesterday to find net trades.
-
-    Args:
-        funds: list of ARK fund tickers to check e.g. ["ARKK", "ARKW"]
-        watchlist: list of stock symbols user is tracking
-        prev_ark_holdings: {fund: {ticker: shares}} from yesterday's signal_cache["ark_holdings"]
-                           Pass {} on first run.
+    Fetch recent ARK fund trades from arkfunds.io (last 5 trading days).
 
     Returns:
-        watchlist_matches: {sym: [signal, ...]} for watchlist symbols with net change > 10K shares
-        untracked_list:    [signal] for non-watchlist symbols with net change > 10K shares
-        today_holdings:    {fund: {ticker: shares}} — save this as signal_cache["ark_holdings"]
+        watchlist_matches: {sym: [signal, ...]} for watchlist symbols
+        untracked_list:    [signal] for symbols NOT in watchlist
+        today_holdings:    {} (holdings diff no longer needed)
 
     Each signal:
         {"type": "ark", "fund": str, "action": "buy"|"sell",
          "shares": int, "date": str, "sym": str}
     """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     watchlist_upper = {s.upper() for s in watchlist}
     watchlist_matches: dict[str, list[dict]] = {}
     untracked_list: list[dict] = []
-    today_holdings: dict[str, dict[str, int]] = {}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
 
     for fund in funds:
-        url = ARK_CSV_URLS.get(fund.upper())
-        if not url:
+        fund_upper = fund.upper()
+        if fund_upper not in VALID_ARK_FUNDS:
             logger.warning("fetch_ark_trades: unknown fund %s", fund)
             continue
         try:
+            url = _ARKFUNDS_TRADES_URL.format(fund=fund_upper)
             resp = requests.get(url, timeout=15,
                                 headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
-            current = _parse_ark_csv(resp.text)
-            today_holdings[fund.upper()] = current
+            data = resp.json()
         except Exception as e:
             logger.warning("fetch_ark_trades(%s) failed: %s", fund, e)
             continue
 
-        prev = prev_ark_holdings.get(fund.upper(), {})
-        all_tickers = set(current) | set(prev)
-
-        for ticker in all_tickers:
-            cur_shares = current.get(ticker, 0)
-            prv_shares = prev.get(ticker, 0)
-            net = cur_shares - prv_shares
-            if abs(net) < 10_000:
+        for trade in data.get("trades", []):
+            ticker = (trade.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            date = (trade.get("date") or "")[:10]
+            if date < cutoff:
+                continue
+            direction = (trade.get("direction") or "").lower()
+            if direction == "buy":
+                action = "buy"
+            elif direction == "sell":
+                action = "sell"
+            else:
                 continue
 
-            action = "buy" if net > 0 else "sell"
             signal: dict = {
                 "type":   "ark",
-                "fund":   fund.upper(),
+                "fund":   fund_upper,
                 "action": action,
-                "shares": abs(net),
-                "date":   today,
+                "shares": int(trade.get("shares") or 0),
+                "date":   date,
                 "sym":    ticker,
             }
             if ticker in watchlist_upper:
@@ -286,9 +256,9 @@ def fetch_ark_trades(
             else:
                 untracked_list.append(signal)
 
-        time.sleep(0.5)  # be polite between fund downloads
+        time.sleep(0.3)
 
-    return watchlist_matches, untracked_list, today_holdings
+    return watchlist_matches, untracked_list, {}
 
 
 def refresh_signals(
