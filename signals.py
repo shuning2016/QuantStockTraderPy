@@ -24,7 +24,7 @@ VALID_ARK_FUNDS = {"ARKK", "ARKW", "ARKQ", "ARKG", "ARKF", "ARKX"}
 
 # ── Fund manager 13F registry ─────────────────────────────────────────────────
 # Maps display name → {cik (10-digit zero-padded), fund name}
-# Verified via data.sec.gov/submissions May 2026
+# CIKs sourced from data.sec.gov/submissions
 FUND_MANAGER_REGISTRY: dict[str, dict] = {
     "Michael Burry":         {"cik": "0001649339", "fund": "Scion Asset Management"},
     "Carl Icahn":            {"cik": "0000921669", "fund": "Icahn Capital"},
@@ -58,7 +58,7 @@ def _parse_13f_infotable(xml_text: str) -> dict[str, dict]:
     for entry in root.findall("t:infoTable", ns):
         cusip_el  = entry.find("t:cusip", ns)
         issuer_el = entry.find("t:nameOfIssuer", ns)
-        shares_el = entry.find(".//t:sshPrnamt", ns)
+        shares_el = entry.find(".//t:sshPrnamt", ns)  # nested inside shrsOrPrnAmt, needs deep search
         value_el  = entry.find("t:value", ns)
 
         if cusip_el is None or issuer_el is None:
@@ -74,6 +74,8 @@ def _parse_13f_infotable(xml_text: str) -> dict[str, dict]:
         except ValueError:
             continue
 
+        if cusip in holdings:
+            logger.warning("_parse_13f_infotable: duplicate CUSIP %s, overwriting", cusip)
         holdings[cusip] = {
             "issuer": (issuer_el.text or "").strip(),
             "shares": shares,

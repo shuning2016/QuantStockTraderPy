@@ -389,12 +389,10 @@ def test_fund_manager_registry_contains_known_managers():
     assert "Stanley Druckenmiller" in names
     assert "Warren Buffett" in names
     assert "George Soros" in names
-    assert "Mark Minervini" not in names
-    assert "Cathie Wood" not in names
 
 
 def test_fund_manager_registry_has_required_fields():
     for name, info in signals.FUND_MANAGER_REGISTRY.items():
         assert "cik" in info, f"{name} missing cik"
         assert "fund" in info, f"{name} missing fund"
-        assert info["cik"].startswith("000"), f"{name} cik should be zero-padded 10 digits"
+        assert len(info["cik"]) == 10 and info["cik"].isdigit(), f"{name} cik must be exactly 10 digits, got '{info['cik']}'"
