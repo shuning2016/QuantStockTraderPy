@@ -899,7 +899,7 @@ def _api_post_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+            if r.status_code in (429, 500, 502, 503, 504, 529) and attempt < max_retries:
                 if r.status_code == 429:
                     # Respect provider's Retry-After header; cap at 10s so the
                     # total worst-case (sleep + retried POST) stays well inside
@@ -908,6 +908,9 @@ def _api_post_with_retry(
                     # auto-retry the entire session.
                     retry_after = int(r.headers.get("Retry-After", delay))
                     sleep_secs = min(retry_after, 10)
+                elif r.status_code == 529:
+                    # Anthropic "Overloaded" — give the API time to recover.
+                    sleep_secs = 30
                 else:
                     sleep_secs = delay
                 _ai_log.warning(
@@ -975,7 +978,7 @@ def call_claude(prompt: str, max_tokens: int = MAX_TOKENS,
             payload=payload,
             timeout=75,
             provider_name="Claude",
-            max_retries=2,
+            max_retries=3,
         )
         data = r.json()
         if not r.ok or not data.get("content"):
