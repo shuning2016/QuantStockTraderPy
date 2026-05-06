@@ -396,3 +396,119 @@ def test_fund_manager_registry_has_required_fields():
         assert "cik" in info, f"{name} missing cik"
         assert "fund" in info, f"{name} missing fund"
         assert len(info["cik"]) == 10 and info["cik"].isdigit(), f"{name} cik must be exactly 10 digits, got '{info['cik']}'"
+
+
+# ── fetch_fund_manager_signals tests ──────────────────────────────────────────
+
+FAKE_SUBMISSIONS_13F = {
+    "filings": {"recent": {
+        "form":            ["13F-HR",                  "13F-HR",                  "10-K"],
+        "filingDate":      ["2026-02-17",              "2025-11-14",              "2025-04-01"],
+        "accessionNumber": ["0001172661-26-001091",    "0001172661-25-009999",    "0000000000-25-000000"],
+    }}
+}
+
+INFOTABLE_CURRENT = """\
+<?xml version="1.0"?>
+<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
+  <infoTable>
+    <nameOfIssuer>ALPHABET INC</nameOfIssuer><cusip>GOOGCUSIP1</cusip>
+    <value>2000000000</value>
+    <shrsOrPrnAmt><sshPrnamt>7000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>NEW POSITION CO</nameOfIssuer><cusip>NEWCUSIP11</cusip>
+    <value>500000000</value>
+    <shrsOrPrnAmt><sshPrnamt>1000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>
+</informationTable>"""
+
+INFOTABLE_PREV = """\
+<?xml version="1.0"?>
+<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
+  <infoTable>
+    <nameOfIssuer>ALPHABET INC</nameOfIssuer><cusip>GOOGCUSIP1</cusip>
+    <value>1500000000</value>
+    <shrsOrPrnAmt><sshPrnamt>5000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>EXITED CO</nameOfIssuer><cusip>EXITCUSIP1</cusip>
+    <value>100000000</value>
+    <shrsOrPrnAmt><sshPrnamt>500000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>
+</informationTable>"""
+
+
+def _make_manager_fake_get(submissions_json, current_xml, prev_xml):
+    """Returns a fake requests.get serving submissions JSON then two infotable XMLs."""
+    call_count = {"n": 0}
+    def fake_get(url, **kw):
+        class R:
+            def raise_for_status(self): pass
+            def json(self_):
+                return submissions_json
+            @property
+            def text(self_):
+                call_count["n"] += 1
+                return current_xml if call_count["n"] == 1 else prev_xml
+        return R()
+    return fake_get
+
+
+def test_fetch_fund_manager_signals_new_position(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    fake_get = _make_manager_fake_get(FAKE_SUBMISSIONS_13F, INFOTABLE_CURRENT, INFOTABLE_PREV)
+    monkeypatch.setattr(signals.requests, "get", fake_get)
+    wl, untracked = signals.fetch_fund_manager_signals(managers=["Bill Ackman"], watchlist=[])
+    new_sigs = [s for s in untracked if s.get("action") == "new"]
+    assert any(s["cusip"] == "NEWCUSIP11" for s in new_sigs)
+
+
+def test_fetch_fund_manager_signals_exited_position(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    fake_get = _make_manager_fake_get(FAKE_SUBMISSIONS_13F, INFOTABLE_CURRENT, INFOTABLE_PREV)
+    monkeypatch.setattr(signals.requests, "get", fake_get)
+    wl, untracked = signals.fetch_fund_manager_signals(managers=["Bill Ackman"], watchlist=[])
+    exit_sigs = [s for s in untracked if s.get("action") == "exit"]
+    assert any(s["cusip"] == "EXITCUSIP1" for s in exit_sigs)
+
+
+def test_fetch_fund_manager_signals_increased_position(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    fake_get = _make_manager_fake_get(FAKE_SUBMISSIONS_13F, INFOTABLE_CURRENT, INFOTABLE_PREV)
+    monkeypatch.setattr(signals.requests, "get", fake_get)
+    wl, untracked = signals.fetch_fund_manager_signals(managers=["Bill Ackman"], watchlist=[])
+    buy_sigs = [s for s in untracked if s.get("action") == "buy" and s.get("cusip") == "GOOGCUSIP1"]
+    assert len(buy_sigs) == 1
+    assert buy_sigs[0]["shares"] == 2_000_000
+    assert buy_sigs[0]["who"] == "Bill Ackman"
+    assert buy_sigs[0]["fund"] == "Pershing Square"
+    assert buy_sigs[0]["type"] == "manager"
+
+
+def test_fetch_fund_manager_signals_skips_unknown_manager(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    monkeypatch.setattr(signals.requests, "get", lambda *a, **kw: (_ for _ in ()).throw(Exception("should not call")))
+    wl, untracked = signals.fetch_fund_manager_signals(managers=["Mark Minervini"], watchlist=[])
+    assert wl == {}
+    assert untracked == []
+
+
+def test_fetch_fund_manager_signals_only_one_13f_returns_empty(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    one_filing = {
+        "filings": {"recent": {
+            "form":            ["13F-HR"],
+            "filingDate":      ["2026-02-17"],
+            "accessionNumber": ["0001172661-26-001091"],
+        }}
+    }
+    fake_get = _make_manager_fake_get(one_filing, INFOTABLE_CURRENT, INFOTABLE_PREV)
+    monkeypatch.setattr(signals.requests, "get", fake_get)
+    wl, untracked = signals.fetch_fund_manager_signals(managers=["Bill Ackman"], watchlist=[])
+    assert wl == {}
+    assert untracked == []

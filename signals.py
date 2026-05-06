@@ -85,6 +85,148 @@ def _parse_13f_infotable(xml_text: str) -> dict[str, dict]:
     return holdings
 
 
+def _fetch_13f_holdings(cik: str, accession: str) -> dict[str, dict]:
+    """
+    Fetch and parse the infotable.xml for one 13F-HR filing.
+    cik: raw integer string (e.g. "1336528", no zero-padding)
+    accession: with dashes (e.g. "0001172661-26-001091")
+    Returns {cusip: {issuer, shares, value}} or {} on failure.
+    """
+    acc_clean = accession.replace("-", "")
+    url = _EDGAR_13F_TABLE_URL.format(cik=cik, acc=acc_clean)
+    try:
+        time.sleep(0.12)
+        resp = requests.get(url, headers={"User-Agent": _EDGAR_UA}, timeout=15)
+        resp.raise_for_status()
+        return _parse_13f_infotable(resp.text)
+    except Exception as e:
+        logger.warning("_fetch_13f_holdings(%s, %s) failed: %s", cik, accession, e)
+        return {}
+
+
+def fetch_fund_manager_signals(
+    managers: list[str],
+    watchlist: list[str],
+) -> tuple[dict[str, list[dict]], list[dict]]:
+    """
+    Fetch last two 13F-HR filings for each known fund manager, diff holdings
+    quarter-over-quarter, and return signals for position changes.
+
+    Signal thresholds:
+    - new:  position in current quarter, absent from previous
+    - exit: position in previous quarter, absent from current
+    - buy:  shares increased >= 10%
+    - sell: shares decreased >= 10%
+    Changes < 10% are ignored.
+
+    All signals go to untracked_list because ticker symbols are not in 13F XML.
+    watchlist_matches is always {}.
+
+    Signal dict keys:
+      type, who, fund, action, shares (delta), pct_change, issuer, cusip,
+      date (filing date YYYY-MM-DD), quarter (e.g. "Q4 2025"), sym ("")
+    """
+    untracked: list[dict] = []
+
+    for manager_name in managers:
+        info = FUND_MANAGER_REGISTRY.get(manager_name)
+        if not info:
+            logger.warning("fetch_fund_manager_signals: unknown manager %s", manager_name)
+            continue
+
+        cik_padded = info["cik"]           # e.g. "0001336528"
+        cik_raw    = str(int(cik_padded))  # e.g. "1336528"
+        fund_name  = info["fund"]
+
+        # ── Fetch submissions to find last two 13F-HR filings ────────────
+        try:
+            resp = requests.get(
+                _EDGAR_SUBS_URL.format(cik=cik_padded),
+                headers={"User-Agent": _EDGAR_UA}, timeout=15,
+            )
+            resp.raise_for_status()
+            recent = resp.json().get("filings", {}).get("recent", {})
+        except Exception as e:
+            logger.warning("fetch_fund_manager_signals(%s): submissions failed: %s",
+                           manager_name, e)
+            continue
+
+        forms      = recent.get("form", [])
+        dates      = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
+
+        filings_13f = [
+            (dates[i], accessions[i])
+            for i, f in enumerate(forms)
+            if f == "13F-HR"
+        ]
+
+        if len(filings_13f) < 2:
+            logger.info(
+                "fetch_fund_manager_signals(%s): need >=2 13F filings, got %d",
+                manager_name, len(filings_13f),
+            )
+            continue
+
+        cur_date, cur_acc = filings_13f[0]
+        _prv_date, prv_acc = filings_13f[1]
+
+        # ── Derive reporting quarter from filing date ─────────────────────
+        try:
+            fd      = datetime.strptime(cur_date, "%Y-%m-%d")
+            qtr_end = fd - timedelta(days=45)   # approx: 45 days after quarter end
+            q       = (qtr_end.month - 1) // 3 + 1
+            quarter = f"Q{q} {qtr_end.year}"
+        except Exception:
+            quarter = cur_date[:7]
+
+        cur_holdings = _fetch_13f_holdings(cik_raw, cur_acc)
+        prv_holdings = _fetch_13f_holdings(cik_raw, prv_acc)
+
+        for cusip in set(cur_holdings) | set(prv_holdings):
+            cur = cur_holdings.get(cusip)
+            prv = prv_holdings.get(cusip)
+
+            if cur and not prv:
+                action     = "new"
+                delta      = cur["shares"]
+                pct_change = 100.0
+                issuer     = cur["issuer"]
+            elif prv and not cur:
+                action     = "exit"
+                delta      = prv["shares"]
+                pct_change = -100.0
+                issuer     = prv["issuer"]
+            else:
+                if prv["shares"] == 0:
+                    continue
+                pct = (cur["shares"] - prv["shares"]) / prv["shares"] * 100
+                if abs(pct) < 10:
+                    continue
+                action     = "buy" if pct > 0 else "sell"
+                delta      = abs(cur["shares"] - prv["shares"])
+                pct_change = round(pct, 1)
+                issuer     = cur["issuer"]
+
+            untracked.append({
+                "type":       "manager",
+                "who":        manager_name,
+                "fund":       fund_name,
+                "action":     action,
+                "shares":     delta,
+                "pct_change": pct_change,
+                "issuer":     issuer,
+                "cusip":      cusip,
+                "date":       cur_date,
+                "quarter":    quarter,
+                "sym":        "",
+            })
+
+        time.sleep(0.2)
+
+    return {}, untracked
+
+
 # ── SEC EDGAR Form 4 (insider trades, ~2 business day delay) ─────────────────
 _EDGAR_UA          = "StockTrader/1.0 shuning.wang@shopee.com"
 _EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
