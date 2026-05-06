@@ -37,6 +37,7 @@ def test_parse_insider_csv_fields():
     assert buy["date"] == "2026-05-01"
     assert buy["type"] == "insider"
     assert buy["is_plan"] is False
+    assert buy["filing_date"] == "2026-05-03"
 
 
 def test_fetch_insider_trades_uses_sleep(monkeypatch):
@@ -61,3 +62,9 @@ def test_fetch_insider_trades_handles_http_error(monkeypatch):
     monkeypatch.setattr(signals.requests, "get", bad_get)
     result = signals.fetch_insider_trades(["NVDA"])
     assert result == {}  # graceful failure, no crash
+
+
+def test_parse_insider_csv_empty_returns_empty_list():
+    empty_csv = "X,Filing Date,Trade Date,Ticker,Company Name,Insider Name,Title,Trade Type,Price,Qty,Owned,ΔOwn,Value\n"
+    result = signals._parse_insider_csv("NVDA", empty_csv)
+    assert result == []
