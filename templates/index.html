@@ -105,6 +105,7 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .sig-dot.insider{background:#f59e0b}
 .sig-dot.politician{background:#a855f7}
 .sig-dot.ark{background:#22c55e}
+.sig-dot.manager{background:#3b82f6}
 .sig-dots{display:flex;gap:2px;align-items:center}
 .sig-panel{border-top:1px solid var(--bdr);padding-top:10px;margin-top:10px}
 .sig-panel-title{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
@@ -112,10 +113,12 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .sig-row.insider{background:var(--amber-l,#fffbeb);border-left:3px solid #f59e0b}
 .sig-row.politician{background:var(--purple-l,#fdf4ff);border-left:3px solid #a855f7}
 .sig-row.ark{background:var(--green-l,#f0fdf4);border-left:3px solid #22c55e}
+.sig-row.manager{background:var(--blue-l,#dbeafe);border-left:3px solid #3b82f6}
 .sig-row-who{font-weight:600;font-size:11px}
 .sig-row-who.insider{color:#b45309}
 .sig-row-who.politician{color:#7e22ce}
 .sig-row-who.ark{color:#15803d}
+.sig-row-who.manager{color:#1d4ed8}
 .sig-action-badge{font-size:10px;font-weight:700;padding:0 5px;border-radius:3px;margin-left:5px}
 .sig-action-badge.buy{background:#dcfce7;color:#15803d}
 .sig-action-badge.sell{background:#fee2e2;color:#991b1b}
@@ -738,6 +741,7 @@ function buildSigDots(sym,type){
   if(types.has('insider'))   dots+=`<span class="sig-dot insider"   title="内部人士信号"></span>`;
   if(types.has('politician'))dots+=`<span class="sig-dot politician" title="政客信号"></span>`;
   if(types.has('ark'))       dots+=`<span class="sig-dot ark"        title="ARK信号"></span>`;
+  if(types.has('manager'))   dots+=`<span class="sig-dot manager"    title="基金经理信号"></span>`;
   return dots;
 }
 function renderChips(){
@@ -951,11 +955,15 @@ function renderSigUntracked(){
   const list=signalCache.untracked_signals||[];
   if(!list.length){el.innerHTML='<div class="empty-panel">暂无未追踪信号</div>';return;}
   el.innerHTML=list.map(s=>{
-    const typeBg=s.type==='insider'?'#fffbeb':s.type==='politician'?'#fdf4ff':'#f0fdf4';
-    const typeColor=s.type==='insider'?'#b45309':s.type==='politician'?'#7e22ce':'#15803d';
-    const typeLabel=s.type==='insider'?'🏦 Insider':s.type==='politician'?'🏛️ '+esc(s.who||''):'🦆 '+esc(s.fund||'');
-    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
-    const detail=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:s.amount_range||(s.shares?s.shares.toLocaleString()+'股':'');
+    const isManager=s.type==='manager';
+    const typeBg   =s.type==='insider'?'#fffbeb':s.type==='politician'?'#fdf4ff':isManager?'#dbeafe':'#f0fdf4';
+    const typeColor =s.type==='insider'?'#b45309':s.type==='politician'?'#7e22ce':isManager?'#1d4ed8':'#15803d';
+    const typeLabel =s.type==='insider'?'🏦 Insider':s.type==='politician'?'🏛️ '+esc(s.who||''):isManager?'💼 '+esc(s.who||''):'🦆 '+esc(s.fund||'');
+    const actionLbl =isManager?(s.action==='new'?'NEW':s.action==='exit'?'EXIT':s.action==='buy'?'BUY':'SELL'):(s.action==='buy'?'BUY':'SELL');
+    const badge=`<span class="sig-action-badge ${s.action==='exit'?'sell':s.action}">${actionLbl}</span>`;
+    const detail=isManager
+      ?`${esc(s.issuer||s.sym||'')} · ${s.pct_change>0?'+':''}${s.pct_change}% · ${esc(s.quarter||'')}`
+      :s.amount?`$${(s.amount/1e6).toFixed(1)}M`:s.amount_range||(s.shares?s.shares.toLocaleString()+'股':'');
     return`<div style="display:flex;align-items:center;justify-content:space-between;
                        padding:9px 10px;background:var(--card);border:1px solid var(--bdr);
                        border-radius:6px;margin-bottom:5px;font-size:12px">
@@ -978,9 +986,13 @@ function renderSigAll(){
   all.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   if(!all.length){el.innerHTML='<div class="empty-panel">暂无信号数据</div>';return;}
   el.innerHTML=all.map(s=>{
-    const typeLabel=s.type==='insider'?'🏦 '+esc(s.who||''):s.type==='politician'?'🏛️ '+esc(s.who||''):'🦆 '+esc(s.fund||'');
-    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
-    const detail=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:s.amount_range||(s.shares?s.shares.toLocaleString()+'股':'');
+    const isManager=s.type==='manager';
+    const typeLabel=s.type==='insider'?'🏦 '+esc(s.who||''):s.type==='politician'?'🏛️ '+esc(s.who||''):isManager?'💼 '+esc(s.who||''):'🦆 '+esc(s.fund||'');
+    const actionLbl=isManager?(s.action==='new'?'NEW':s.action==='exit'?'EXIT':s.action==='buy'?'BUY':'SELL'):(s.action==='buy'?'BUY':'SELL');
+    const badge=`<span class="sig-action-badge ${s.action==='exit'?'sell':s.action}">${actionLbl}</span>`;
+    const detail=isManager
+      ?`${esc(s.issuer||'')} · ${s.pct_change>0?'+':''}${s.pct_change}% · ${esc(s.quarter||'')}`
+      :s.amount?`$${(s.amount/1e6).toFixed(1)}M`:s.amount_range||(s.shares?s.shares.toLocaleString()+'股':'');
     return`<div style="padding:8px 10px;background:var(--card);border:1px solid var(--bdr);
                        border-radius:6px;margin-bottom:5px;font-size:12px;display:flex;
                        justify-content:space-between;align-items:center">
