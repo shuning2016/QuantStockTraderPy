@@ -323,3 +323,78 @@ def test_refresh_signals_partial_on_failure(monkeypatch):
         quiver_key="",
     )
     assert result["partial"] is True
+
+
+# ── Fund Manager 13F tests ────────────────────────────────────────────────────
+
+INFOTABLE_XML = """\
+<?xml version="1.0" ?>
+<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <infoTable>
+    <nameOfIssuer>ALPHABET INC</nameOfIssuer>
+    <titleOfClass>CAP STK CL C</titleOfClass>
+    <cusip>02079K107</cusip>
+    <value>1934222720</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>6163871</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>
+  <infoTable>
+    <nameOfIssuer>AMAZON COM INC</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>023135106</cusip>
+    <value>2217677936</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>9607824</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>
+</informationTable>"""
+
+
+def test_parse_13f_infotable_returns_cusip_map():
+    result = signals._parse_13f_infotable(INFOTABLE_XML)
+    assert "02079K107" in result
+    assert result["02079K107"]["issuer"] == "ALPHABET INC"
+    assert result["02079K107"]["shares"] == 6_163_871
+    assert result["02079K107"]["value"] == 1_934_222_720
+
+
+def test_parse_13f_infotable_two_entries():
+    result = signals._parse_13f_infotable(INFOTABLE_XML)
+    assert len(result) == 2
+    assert "023135106" in result
+
+
+def test_parse_13f_infotable_empty_xml():
+    xml = '<?xml version="1.0"?><informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable"></informationTable>'
+    result = signals._parse_13f_infotable(xml)
+    assert result == {}
+
+
+def test_parse_13f_infotable_bad_xml_returns_empty():
+    result = signals._parse_13f_infotable("not xml at all <><")
+    assert result == {}
+
+
+def test_fund_manager_registry_contains_known_managers():
+    names = set(signals.FUND_MANAGER_REGISTRY.keys())
+    assert "Michael Burry" in names
+    assert "Bill Ackman" in names
+    assert "Carl Icahn" in names
+    assert "Stanley Druckenmiller" in names
+    assert "Warren Buffett" in names
+    assert "George Soros" in names
+    assert "Mark Minervini" not in names
+    assert "Cathie Wood" not in names
+
+
+def test_fund_manager_registry_has_required_fields():
+    for name, info in signals.FUND_MANAGER_REGISTRY.items():
+        assert "cik" in info, f"{name} missing cik"
+        assert "fund" in info, f"{name} missing fund"
+        assert info["cik"].startswith("000"), f"{name} cik should be zero-padded 10 digits"

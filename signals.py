@@ -22,6 +22,67 @@ _ARKFUNDS_TRADES_URL = "https://arkfunds.io/api/v2/etf/trades?symbol={fund}&peri
 
 VALID_ARK_FUNDS = {"ARKK", "ARKW", "ARKQ", "ARKG", "ARKF", "ARKX"}
 
+# ── Fund manager 13F registry ─────────────────────────────────────────────────
+# Maps display name → {cik (10-digit zero-padded), fund name}
+# Verified via data.sec.gov/submissions May 2026
+FUND_MANAGER_REGISTRY: dict[str, dict] = {
+    "Michael Burry":         {"cik": "0001649339", "fund": "Scion Asset Management"},
+    "Carl Icahn":            {"cik": "0000921669", "fund": "Icahn Capital"},
+    "Bill Ackman":           {"cik": "0001336528", "fund": "Pershing Square"},
+    "Stanley Druckenmiller": {"cik": "0001536411", "fund": "Duquesne Family Office"},
+    "Warren Buffett":        {"cik": "0001067983", "fund": "Berkshire Hathaway"},
+    "George Soros":          {"cik": "0001029160", "fund": "Soros Fund Management"},
+}
+
+# ── EDGAR 13F URLs ────────────────────────────────────────────────────────────
+_EDGAR_13F_TABLE_URL = (
+    "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/infotable.xml"
+)
+
+_13F_NS = "http://www.sec.gov/edgar/document/thirteenf/informationtable"
+
+
+def _parse_13f_infotable(xml_text: str) -> dict[str, dict]:
+    """
+    Parse a 13F-HR infotable.xml into {cusip: {issuer, shares, value}}.
+    Value is in dollars as reported. Returns {} on any parse error.
+    """
+    holdings: dict[str, dict] = {}
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.warning("_parse_13f_infotable: XML parse error: %s", e)
+        return {}
+
+    ns = {"t": _13F_NS}
+    for entry in root.findall("t:infoTable", ns):
+        cusip_el  = entry.find("t:cusip", ns)
+        issuer_el = entry.find("t:nameOfIssuer", ns)
+        shares_el = entry.find(".//t:sshPrnamt", ns)
+        value_el  = entry.find("t:value", ns)
+
+        if cusip_el is None or issuer_el is None:
+            continue
+
+        cusip = (cusip_el.text or "").strip()
+        if not cusip:
+            continue
+
+        try:
+            shares = int(shares_el.text or "0") if shares_el is not None else 0
+            value  = int(value_el.text  or "0") if value_el  is not None else 0
+        except ValueError:
+            continue
+
+        holdings[cusip] = {
+            "issuer": (issuer_el.text or "").strip(),
+            "shares": shares,
+            "value":  value,
+        }
+
+    return holdings
+
+
 # ── SEC EDGAR Form 4 (insider trades, ~2 business day delay) ─────────────────
 _EDGAR_UA          = "StockTrader/1.0 shuning.wang@shopee.com"
 _EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
