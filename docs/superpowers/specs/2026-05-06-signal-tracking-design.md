@@ -22,7 +22,7 @@ Add a signal tracking layer that monitors insider trades (SEC Form 4), politicia
 
 **OpenInsider filter criteria** (applied server-side before caching):
 - Open-market purchases/sales only (exclude option exercises, ESPP, gifts)
-- Transaction value > $50K
+- Transaction value > $500K
 - Exclude 10b5-1 scheduled plans (`is10b5=0`)
 - Roles: CEO, CFO, COO, President, Director, 10%+ owner
 
