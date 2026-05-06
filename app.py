@@ -1014,7 +1014,7 @@ def call_grok(prompt: str, max_tokens: int = MAX_TOKENS,
                      "Content-Type": "application/json"},
             payload={"model": MODELS["grok"]["model"], "max_tokens": max_tokens,
                      "messages": messages},
-            timeout=60,
+            timeout=120,
             provider_name="Grok",
             max_retries=2,
         )
