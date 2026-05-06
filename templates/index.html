@@ -106,6 +106,19 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .sig-dot.politician{background:#a855f7}
 .sig-dot.ark{background:#22c55e}
 .sig-dots{display:flex;gap:2px;align-items:center}
+.sig-panel{border-top:1px solid var(--bdr);padding-top:10px;margin-top:10px}
+.sig-panel-title{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.sig-row{padding:7px 10px;border-radius:0 6px 6px 0;margin-bottom:5px;font-size:12px;line-height:1.5}
+.sig-row.insider{background:var(--amber-l,#fffbeb);border-left:3px solid #f59e0b}
+.sig-row.politician{background:var(--purple-l,#fdf4ff);border-left:3px solid #a855f7}
+.sig-row.ark{background:var(--green-l,#f0fdf4);border-left:3px solid #22c55e}
+.sig-row-who{font-weight:600;font-size:11px}
+.sig-row-who.insider{color:#b45309}
+.sig-row-who.politician{color:#7e22ce}
+.sig-row-who.ark{color:#15803d}
+.sig-action-badge{font-size:10px;font-weight:700;padding:0 5px;border-radius:3px;margin-left:5px}
+.sig-action-badge.buy{background:#dcfce7;color:#15803d}
+.sig-action-badge.sell{background:#fee2e2;color:#991b1b}
 .q-meta{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}
 .qstat{display:flex;flex-direction:column;align-items:center}
 .qstat-l{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.3px}
@@ -576,6 +589,31 @@ async function loadStocks(){
 }
 function renderSignalBadgeCount(){} // stub — full impl in 信号追踪 tab section
 
+function buildSignalPanel(sym){
+  const sigs=(signalCache.watchlist_signals||{})[sym.toUpperCase()];
+  if(!sigs||!sigs.length)return'';
+  const rows=sigs.map(s=>{
+    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
+    let detail='';
+    if(s.type==='insider'){
+      const amt=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:'';
+      detail=`${s.shares?s.shares.toLocaleString()+'股':''} ${amt}`.trim();
+    }else if(s.type==='politician'){
+      detail=s.amount_range||'';
+    }else if(s.type==='ark'){
+      detail=s.shares?s.shares.toLocaleString()+'股 净变动':'';
+    }
+    return`<div class="sig-row ${s.type}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span class="sig-row-who ${s.type}">${s.type==='insider'?'🏦 ':s.type==='politician'?'🏛️ ':'🦆 '}${esc(s.who||s.fund||'')}${s.role?` · ${esc(s.role)}`:''}${badge}</span>
+        <span style="font-size:10px;color:var(--t3)">${s.date||''}</span>
+      </div>
+      ${detail?`<div style="margin-top:2px;color:var(--t2)">${esc(detail)}</div>`:''}
+    </div>`;
+  }).join('');
+  return`<div class="sig-panel"><div class="sig-panel-title">📡 信号追踪</div>${rows}</div>`;
+}
+
 async function loadSignalData(){
   try{
     const[cache,cfg]=await Promise.all([
@@ -706,7 +744,8 @@ function buildCard(item,loading){
         <div class="ai-txt">${esc(cachedAI.text)}</div>
       </div></div>`
     : `<div id="ai-wrap-${key}" class="ai-wrap" style="display:none"></div>`;
-  return`<div class="qcard${ic?' crypto':''}" id="card-${key}">${qHead}<div class="qcard-actions"><button class="btn btn-p btn-sm" onclick="queryItem('${item.symbol}','${item.type}')" id="qbtn-${key}">🔍 查询行情 &amp; 新闻</button><button class="ai-btn" onclick="analyzeItem('${item.symbol}','${item.type}')" id="ai-btn-${key}">🤖 AI 分析</button></div>${aiHtml}${newsHtml}</div>`;
+  const sigHtml=!ic?buildSignalPanel(item.symbol):'';
+  return`<div class="qcard${ic?' crypto':''}" id="card-${key}">${qHead}<div class="qcard-actions"><button class="btn btn-p btn-sm" onclick="queryItem('${item.symbol}','${item.type}')" id="qbtn-${key}">🔍 查询行情 &amp; 新闻</button><button class="ai-btn" onclick="analyzeItem('${item.symbol}','${item.type}')" id="ai-btn-${key}">🤖 AI 分析</button></div>${aiHtml}${newsHtml}${sigHtml}</div>`;
 }
 async function queryItem(sym,type){
   const key=itemKey(sym,type),btn=document.getElementById('qbtn-'+key);
