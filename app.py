@@ -235,7 +235,7 @@ def load_signal_config() -> dict:
             return json.loads(SIGNAL_CONFIG_FILE.read_text())
         except Exception:
             pass
-    return {"politicians": [], "ark_funds": [], "updated_at": ""}
+    return {"politicians": [], "ark_funds": [], "fund_managers": [], "updated_at": ""}
 
 def save_signal_config(config: dict) -> None:
     if _USE_KV:
