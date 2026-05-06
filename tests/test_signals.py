@@ -10,64 +10,163 @@ import signals
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-INSIDER_CSV = """\
-X,Filing Date,Trade Date,Ticker,Company Name,Insider Name,Title,Trade Type,Price,Qty,Owned,ΔOwn,Value
-1,2026-05-03,2026-05-01,NVDA,NVIDIA Corp,Jensen Huang,CEO,P - Purchase,$1084.00,"20,000","1,000,000",+2%,"$21,680,000"
-2,2026-05-02,2026-04-30,NVDA,NVIDIA Corp,Some CFO,CFO,S - Sale,$1090.00,"5,000","500,000",-1%,"$5,450,000"
-3,2026-05-01,2026-04-29,NVDA,NVIDIA Corp,Some Dir,Director,A - Award,$100.00,"1,000","200,000",+0.5%,"$100,000"
-"""
+FORM4_XML_BUY = """\
+<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2026-05-01</periodOfReport>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Jensen Huang</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isOfficer>true</isOfficer>
+      <officerTitle>CEO</officerTitle>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <aff10b5One>false</aff10b5One>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>20000</value></transactionShares>
+        <transactionPricePerShare><value>1084</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>"""
+
+FORM4_XML_SELL = """\
+<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2026-04-30</periodOfReport>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Some CFO</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isOfficer>true</isOfficer>
+      <officerTitle>CFO</officerTitle>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <aff10b5One>true</aff10b5One>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>5000</value></transactionShares>
+        <transactionPricePerShare><value>1090</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>"""
+
+FORM4_XML_AWARD = """\
+<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2026-04-29</periodOfReport>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Some Dir</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship>
+  </reportingOwner>
+  <aff10b5One>false</aff10b5One>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionCoding><transactionCode>A</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionPricePerShare><value>100</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>"""
 
 
-def test_parse_insider_csv_filters_buy_sell():
-    result = signals._parse_insider_csv("NVDA", INSIDER_CSV)
-    actions = [s["action"] for s in result]
-    assert "buy" in actions
-    assert "sell" in actions
-    # Award type should be excluded
-    assert len(result) == 2
+def test_parse_form4_xml_filters_buy_sell():
+    buys  = signals._parse_form4_xml(FORM4_XML_BUY, "2026-05-03")
+    sells = signals._parse_form4_xml(FORM4_XML_SELL, "2026-05-02")
+    award = signals._parse_form4_xml(FORM4_XML_AWARD, "2026-05-01")
+    assert buys[0]["action"] == "buy"
+    assert sells[0]["action"] == "sell"
+    assert award == []  # award code 'A' excluded
 
 
-def test_parse_insider_csv_fields():
-    result = signals._parse_insider_csv("NVDA", INSIDER_CSV)
-    buy = next(s for s in result if s["action"] == "buy")
-    assert buy["who"] == "Jensen Huang"
-    assert buy["role"] == "CEO"
-    assert buy["amount"] == 21_680_000
-    assert buy["shares"] == 20_000
-    assert buy["date"] == "2026-05-01"
-    assert buy["type"] == "insider"
-    assert buy["is_plan"] is False
-    assert buy["filing_date"] == "2026-05-03"
+def test_parse_form4_xml_fields():
+    result = signals._parse_form4_xml(FORM4_XML_BUY, "2026-05-03")
+    assert len(result) == 1
+    s = result[0]
+    assert s["who"] == "Jensen Huang"
+    assert s["role"] == "CEO"
+    assert s["amount"] == 20_000 * 1084
+    assert s["shares"] == 20_000
+    assert s["date"] == "2026-05-01"
+    assert s["filing_date"] == "2026-05-03"
+    assert s["type"] == "insider"
+    assert s["is_plan"] is False
 
 
-def test_fetch_insider_trades_uses_sleep(monkeypatch):
-    sleep_calls = []
-    monkeypatch.setattr(signals.time, "sleep", lambda x: sleep_calls.append(x))
+def test_parse_form4_xml_is_plan_flag():
+    result = signals._parse_form4_xml(FORM4_XML_SELL, "2026-05-02")
+    assert result[0]["is_plan"] is True
 
-    class FakeResp:
-        text = INSIDER_CSV
-        def raise_for_status(self): pass
 
-    monkeypatch.setattr(signals.requests, "get", lambda *a, **kw: FakeResp())
-    result = signals.fetch_insider_trades(["NVDA", "AAPL"])
+def test_parse_form4_xml_skips_tiny_trades():
+    tiny_xml = """\
+<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2026-05-01</periodOfReport>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Bob</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><officerTitle>VP</officerTitle></reportingOwnerRelationship>
+  </reportingOwner>
+  <aff10b5One>false</aff10b5One>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>10</value></transactionShares>
+        <transactionPricePerShare><value>100</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>"""
+    result = signals._parse_form4_xml(tiny_xml, "2026-05-01")
+    assert result == []  # $1,000 trade < $100K threshold
+
+
+FAKE_TICKERS = {"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA Corp"}}
+FAKE_SUBMISSIONS = {
+    "filings": {"recent": {
+        "form":            ["4",                     "10-K"],
+        "filingDate":      ["2026-05-03",            "2026-04-01"],
+        "accessionNumber": ["0001234567-26-000001",  "0001234567-26-000000"],
+    }}
+}
+
+
+def test_fetch_insider_trades_uses_edgar(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    signals._ticker_cik_cache.clear()
+
+    def fake_get(url, **kw):
+        class R:
+            def raise_for_status(self): pass
+            def json(self_):
+                if "company_tickers" in url:
+                    return FAKE_TICKERS
+                return FAKE_SUBMISSIONS
+            text = FORM4_XML_BUY
+        return R()
+
+    monkeypatch.setattr(signals.requests, "get", fake_get)
+    result = signals.fetch_insider_trades(["NVDA"])
     assert "NVDA" in result
-    assert len(sleep_calls) == 2  # one per symbol
+    assert result["NVDA"][0]["who"] == "Jensen Huang"
 
 
 def test_fetch_insider_trades_handles_http_error(monkeypatch):
     monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+    signals._ticker_cik_cache.clear()
     import requests as req
-    def bad_get(*a, **kw):
-        raise req.RequestException("timeout")
-    monkeypatch.setattr(signals.requests, "get", bad_get)
+    monkeypatch.setattr(signals.requests, "get",
+                        lambda *a, **kw: (_ for _ in ()).throw(req.RequestException("timeout")))
     result = signals.fetch_insider_trades(["NVDA"])
     assert result == {}  # graceful failure, no crash
-
-
-def test_parse_insider_csv_empty_returns_empty_list():
-    empty_csv = "X,Filing Date,Trade Date,Ticker,Company Name,Insider Name,Title,Trade Type,Price,Qty,Owned,ΔOwn,Value\n"
-    result = signals._parse_insider_csv("NVDA", empty_csv)
-    assert result == []
 
 
 QUIVER_RESPONSE = [
@@ -124,50 +223,43 @@ def test_fetch_politician_trades_no_key_returns_empty(monkeypatch):
 
 # ── ARK tests ─────────────────────────────────────────────────────────────────
 
-ARK_CSV_TODAY = """\
-date,fund,company,ticker,cusip,shares,market value ($),weight (%)
-05/06/2026,ARKK,NVIDIA Corp,NVDA,67066G104,"200000","$216000000",7.0%
-05/06/2026,ARKK,Tesla Inc,TSLA,88160R101,"500000","$120000000",4.0%
-05/06/2026,ARKK,Palantir,PLTR,69608A108,"300000","$15000000",0.5%
-"""
-
-ARK_CSV_PREV = {
-    "ARKK": {
-        "NVDA": 150_000,   # bought 50K more → buy signal
-        "TSLA": 510_000,   # sold 10K → exactly at threshold, included as sell
-        # PLTR not present yesterday → new position of 300K → buy signal
-    }
+ARK_TRADES_RESPONSE = {
+    "symbol": "ARKK",
+    "trades": [
+        {"fund": "ARKK", "date": "2026-05-05", "ticker": "NVDA",
+         "direction": "Buy",  "shares": 50_000},
+        {"fund": "ARKK", "date": "2026-05-05", "ticker": "PLTR",
+         "direction": "Buy",  "shares": 300_000},
+        {"fund": "ARKK", "date": "2026-05-05", "ticker": "TSLA",
+         "direction": "Sell", "shares": 10_000},
+        {"fund": "ARKK", "date": "2026-05-05", "ticker": "",   # no ticker → skip
+         "direction": "Buy",  "shares": 5_000},
+    ]
 }
 
 
-def test_fetch_ark_trades_detects_net_changes(monkeypatch):
+def test_fetch_ark_trades_splits_watchlist_vs_untracked(monkeypatch):
     monkeypatch.setattr(signals.time, "sleep", lambda x: None)
 
     class FakeResp:
-        text = ARK_CSV_TODAY
         def raise_for_status(self): pass
+        def json(self): return ARK_TRADES_RESPONSE
 
     monkeypatch.setattr(signals.requests, "get", lambda *a, **kw: FakeResp())
 
     wl_matches, untracked, today_h = signals.fetch_ark_trades(
         funds=["ARKK"],
         watchlist=["NVDA"],
-        prev_ark_holdings=ARK_CSV_PREV,
     )
-    # NVDA: in watchlist, net +50K → buy in watchlist_matches
+    # NVDA in watchlist → watchlist_matches
     assert "NVDA" in wl_matches
     assert wl_matches["NVDA"][0]["action"] == "buy"
     assert wl_matches["NVDA"][0]["shares"] == 50_000
-    # PLTR: not in watchlist, net +300K → untracked
+    # PLTR/TSLA not in watchlist → untracked
     assert any(s["sym"] == "PLTR" for s in untracked)
-    # today_holdings should reflect parsed CSV
-    assert today_h["ARKK"]["NVDA"] == 200_000
-
-
-def test_parse_ark_csv_handles_comma_shares():
-    result = signals._parse_ark_csv(ARK_CSV_TODAY)
-    assert result["NVDA"] == 200_000
-    assert result["TSLA"] == 500_000
+    assert any(s["sym"] == "TSLA" for s in untracked)
+    # today_h is always empty (holdings diff no longer used)
+    assert today_h == {}
 
 
 def test_fetch_ark_trades_skips_unknown_fund(monkeypatch):
@@ -175,7 +267,6 @@ def test_fetch_ark_trades_skips_unknown_fund(monkeypatch):
     wl, untracked, today_h = signals.fetch_ark_trades(
         funds=["FAKEFUND"],
         watchlist=["NVDA"],
-        prev_ark_holdings={},
     )
     assert wl == {}
     assert today_h == {}
