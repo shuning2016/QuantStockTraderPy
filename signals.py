@@ -6,10 +6,9 @@ Storage (load_signal_config, save_signal_config, load_signal_cache, save_signal_
 lives in app.py to avoid circular imports.
 """
 
-import csv
-import io
 import logging
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -23,88 +22,150 @@ _ARKFUNDS_TRADES_URL = "https://arkfunds.io/api/v2/etf/trades?symbol={fund}&peri
 
 VALID_ARK_FUNDS = {"ARKK", "ARKW", "ARKQ", "ARKG", "ARKF", "ARKX"}
 
-# OpenInsider screener endpoint — vl=500000 filters trades >= $500K value
-# is10b5=0 excludes 10b5-1 scheduled-plan trades at source
-_OPENINSIDER_URL = (
-    "http://openinsider.com/screener?s={sym}"
-    "&fd=-1&td=&tdr=&fdlyl=&fdlyh=&daysago=30"
-    "&xs=1&vl=500000"
-    "&isofficer=1&iscob=1&isceo=1&ispres=1&iscoo=1&iscfo=1"
-    "&isgc=1&isvp=1&isdirector=1&is10b5=0&istenpc=1"
-    "&isb=1&iss=1&isauto=1&csv=1"
-)
+# ── SEC EDGAR Form 4 (insider trades, ~2 business day delay) ─────────────────
+_EDGAR_UA          = "StockTrader/1.0 shuning.wang@shopee.com"
+_EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+_EDGAR_SUBS_URL    = "https://data.sec.gov/submissions/CIK{cik}.json"
+_EDGAR_FORM4_URL   = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/form4.xml"
+
+_ticker_cik_cache: dict[str, int] = {}
 
 
-def _parse_value(raw: str) -> int:
-    """Parse OpenInsider value string like '$2,500,000' → 2500000."""
-    return int(raw.replace("$", "").replace(",", "").replace("+", "").strip() or "0")
+def _get_ticker_cik_map() -> dict[str, int]:
+    """Fetch and in-process-cache the SEC ticker → CIK mapping."""
+    global _ticker_cik_cache
+    if _ticker_cik_cache:
+        return _ticker_cik_cache
+    try:
+        resp = requests.get(_EDGAR_TICKERS_URL,
+                            headers={"User-Agent": _EDGAR_UA}, timeout=15)
+        resp.raise_for_status()
+        _ticker_cik_cache = {
+            v["ticker"].upper(): v["cik_str"]
+            for v in resp.json().values()
+        }
+        logger.info("Loaded %d tickers from SEC EDGAR", len(_ticker_cik_cache))
+    except Exception as e:
+        logger.warning("_get_ticker_cik_map failed: %s", e)
+    return _ticker_cik_cache
+
+
+def _parse_form4_xml(xml_text: str, filing_date: str) -> list[dict]:
+    """Parse a Form 4 XML document into a list of insider trade signals."""
+    signals = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.warning("_parse_form4_xml: XML parse error: %s", e)
+        return []
+
+    owner_el   = root.find(".//reportingOwner/reportingOwnerId/rptOwnerName")
+    owner_name = (owner_el.text or "").strip() if owner_el is not None else ""
+
+    title_el = root.find(".//reportingOwnerRelationship/officerTitle")
+    title    = (title_el.text or "").strip() if title_el is not None else ""
+    if not title:
+        is_dir = root.find(".//reportingOwnerRelationship/isDirector")
+        if is_dir is not None and is_dir.text == "1":
+            title = "Director"
+
+    period_el  = root.find("periodOfReport")
+    trade_date = (period_el.text or filing_date).strip() if period_el is not None else filing_date
+
+    is_plan = (root.findtext("aff10b5One") or "false").lower() == "true"
+
+    for tx in root.findall(".//nonDerivativeTransaction"):
+        code_el = tx.find(".//transactionCode")
+        code    = (code_el.text or "").strip() if code_el is not None else ""
+        if code == "P":
+            action = "buy"
+        elif code == "S":
+            action = "sell"
+        else:
+            continue  # skip option exercises, gifts, tax withholding, etc.
+
+        shares_el = tx.find(".//transactionShares/value")
+        shares    = int(float(shares_el.text or "0")) if shares_el is not None else 0
+
+        price_el = tx.find(".//transactionPricePerShare/value")
+        price    = float(price_el.text or "0") if price_el is not None else 0.0
+
+        amount = int(shares * price)
+        if amount < 100_000:  # skip tiny trades (< $100K)
+            continue
+
+        signals.append({
+            "type":        "insider",
+            "who":         owner_name,
+            "role":        title,
+            "action":      action,
+            "amount":      amount,
+            "shares":      shares,
+            "date":        trade_date,
+            "filing_date": filing_date,
+            "is_plan":     is_plan,
+        })
+    return signals
 
 
 def fetch_insider_trades(symbols: list[str]) -> dict[str, list[dict]]:
     """
-    Fetch recent insider trades for the given symbols from OpenInsider.
+    Fetch recent insider trades for the given symbols from SEC EDGAR Form 4.
+    ~2 business day delay; free, no API key required.
 
     Returns {sym: [signal, ...]} where each signal is:
       {"type": "insider", "who": str, "role": str, "action": "buy"|"sell",
-       "amount": int, "shares": int, "date": str, "filing_date": str, "is_plan": False}
-
-    Filters applied:
-    - Transaction value >= $500K (enforced by URL param vl=500000)
-    - 10b5-1 plans excluded (enforced by URL param is10b5=0)
-    - Only P-Purchase and S-Sale trade types included
+       "amount": int, "shares": int, "date": str, "filing_date": str, "is_plan": bool}
     """
+    cutoff  = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    cik_map = _get_ticker_cik_map()
     result: dict[str, list[dict]] = {}
+
     for sym in symbols:
+        cik = cik_map.get(sym.upper())
+        if not cik:
+            logger.warning("fetch_insider_trades: no CIK for %s", sym)
+            continue
+
+        cik_padded = str(cik).zfill(10)
         try:
-            url = _OPENINSIDER_URL.format(sym=sym)
-            resp = requests.get(url, timeout=10,
-                                headers={"User-Agent": "Mozilla/5.0"})
+            resp = requests.get(
+                _EDGAR_SUBS_URL.format(cik=cik_padded),
+                headers={"User-Agent": _EDGAR_UA}, timeout=15,
+            )
             resp.raise_for_status()
-            signals = _parse_insider_csv(sym.upper(), resp.text)
-            if signals:
-                result[sym.upper()] = signals
-            time.sleep(0.3)  # be polite to OpenInsider
+            recent = resp.json().get("filings", {}).get("recent", {})
         except Exception as e:
-            logger.warning("fetch_insider_trades(%s) failed: %s", sym, e)
-    return result
+            logger.warning("fetch_insider_trades(%s): submissions failed: %s", sym, e)
+            time.sleep(0.1)
+            continue
 
+        forms      = recent.get("form", [])
+        dates      = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
 
-def _parse_insider_csv(sym: str, csv_text: str) -> list[dict]:
-    """Parse OpenInsider CSV text for one symbol."""
-    signals = []
-    try:
-        reader = csv.DictReader(io.StringIO(csv_text))
-        for row in reader:
-            # OpenInsider columns: X, Filing Date, Trade Date, Ticker,
-            # Company Name, Insider Name, Title, Trade Type, Price, Qty,
-            # Owned, ΔOwn, Value
-            trade_type = row.get("Trade Type", "").strip()
-            if "P - Purchase" in trade_type:
-                action = "buy"
-            elif "S - Sale" in trade_type:
-                action = "sell"
-            else:
-                continue  # skip option exercises, gifts, etc.
-
-            try:
-                amount = _parse_value(row.get("Value", "0"))
-            except ValueError:
+        sym_signals: list[dict] = []
+        for i, form in enumerate(forms):
+            if form != "4":
                 continue
+            if dates[i] < cutoff:
+                break  # filings are reverse-chronological, safe to stop
 
-            signals.append({
-                "type":         "insider",
-                "who":          row.get("Insider Name", "").strip(),
-                "role":         row.get("Title", "").strip(),
-                "action":       action,
-                "amount":       amount,
-                "shares":       int(row.get("Qty", "0").replace(",", "") or "0"),
-                "date":         row.get("Trade Date", "").strip(),
-                "filing_date":  row.get("Filing Date", "").strip(),
-                "is_plan":      False,
-            })
-    except Exception as e:
-        logger.warning("_parse_insider_csv(%s) failed: %s", sym, e)
-    return signals
+            acc_clean = accessions[i].replace("-", "")
+            xml_url   = _EDGAR_FORM4_URL.format(cik=cik, acc=acc_clean)
+            try:
+                time.sleep(0.12)  # EDGAR asks ≤10 req/s
+                r4 = requests.get(xml_url, headers={"User-Agent": _EDGAR_UA}, timeout=10)
+                r4.raise_for_status()
+                sym_signals.extend(_parse_form4_xml(r4.text, dates[i]))
+            except Exception as e:
+                logger.warning("fetch_insider_trades(%s): form4 fetch failed: %s", sym, e)
+
+        if sym_signals:
+            result[sym.upper()] = sym_signals
+        time.sleep(0.1)
+
+    return result
 
 
 # Quiver Quantitative congressional trading bulk endpoint
