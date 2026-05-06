@@ -452,7 +452,14 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
           <div style="font-size:11px;color:var(--t3);margin-bottom:10px">
             季度 13F 持仓变化，数据来自 SEC EDGAR（免费）。约 45–135 天延迟，显示仓位新增/退出/显著变化（≥10%）。
           </div>
-          <div id="mgr-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+          <div id="mgr-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+          <div id="mgr-tags" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px"></div>
+          <div style="display:flex;gap:6px">
+            <input id="mgr-inp" type="text" placeholder="输入基金经理名称，回车添加…"
+                   style="border:1px solid var(--bdr);border-radius:6px;padding:5px 10px;font-size:12px;background:var(--card);color:var(--t);flex:1"
+                   onkeydown="if(event.key==='Enter')addManager()">
+            <button class="btn btn-sm btn-o" onclick="addManager()">添加</button>
+          </div>
         </div>
 
         <!-- Card 3: ARK funds -->
@@ -942,6 +949,15 @@ function renderSigSettings(){
                    onclick="toggleManager('${esc(name)}')">${on?'✓ ':''}${esc(name)}</span>`;
     }).join('');
   }
+  const mgrTagsEl=document.getElementById('mgr-tags');
+  if(mgrTagsEl){
+    const preset=new Set(FUND_MANAGERS_ALL);
+    const custom=(signalConfig.fund_managers||[]).filter(m=>!preset.has(m));
+    mgrTagsEl.innerHTML=custom.map(m=>
+      `<span style="background:#dbeafe;color:#1d4ed8;padding:3px 10px;border-radius:12px;font-size:12px;cursor:pointer"
+             onclick="removeManager('${esc(m)}')">${esc(m)} <span style="opacity:.6">×</span></span>`
+    ).join('');
+  }
   const metaEl=document.getElementById('sig-meta');
   if(metaEl&&signalCache.fetched_at){
     metaEl.textContent=`上次更新: ${signalCache.fetched_at.replace('T',' ')} UTC · 每周一至五 09:00 ET 自动运行`+
@@ -1033,6 +1049,22 @@ function toggleManager(name){
   const sel=new Set(signalConfig.fund_managers||[]);
   if(sel.has(name))sel.delete(name);else sel.add(name);
   signalConfig.fund_managers=[...sel];
+  saveSigConfig();
+  renderSigSettings();
+}
+function addManager(){
+  const inp=document.getElementById('mgr-inp');
+  const name=(inp.value||'').trim();
+  if(!name)return;
+  const mgrs=signalConfig.fund_managers||[];
+  if(mgrs.includes(name)){toast('已在列表中','err');return;}
+  signalConfig.fund_managers=[...mgrs,name];
+  inp.value='';
+  saveSigConfig();
+  renderSigSettings();
+}
+function removeManager(name){
+  signalConfig.fund_managers=(signalConfig.fund_managers||[]).filter(m=>m!==name);
   saveSigConfig();
   renderSigSettings();
 }
