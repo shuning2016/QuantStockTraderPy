@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 # ─── Config (API keys, model names, cache TTLs) ─────────────────
 from config import (
     FINNHUB_KEY, NEWSAPI_KEY, CLAUDE_KEY, GROK_KEY, DEEPSEEK_KEY,
-    SERPAPI_KEY, PORT, MODELS, MAX_TOKENS, SESSION_MAX_TOKENS,
+    SERPAPI_KEY, QUIVER_KEY, PORT, MODELS, MAX_TOKENS, SESSION_MAX_TOKENS,
     FINNHUB_QUOTE_URL, FINNHUB_NEWS_URL, COINGECKO_COIN_URL, NEWSAPI_URL,
     PRICE_CACHE_TTL, CRYPTO_CACHE_TTL, NEWS_CACHE_TTL,
     check_config,
@@ -35,6 +35,7 @@ from strategy_v6 import (
     execute_decisions, check_operating_rules, get_market_regime,
     check_auto_stop_rules, build_trade_log_entry,
 )
+from signals import refresh_signals as _refresh_signals
 from weekly_review import (
     most_recent_week,
     run_weekend_feedback,
@@ -103,6 +104,8 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── Data persistence (JSON files, equivalent to GAS PropertiesService) ──
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
+SIGNAL_CONFIG_FILE = DATA_DIR / "signal_config.json"
+SIGNAL_CACHE_FILE  = DATA_DIR / "signal_cache.json"
 STATE_DIR      = DATA_DIR / "trade_states"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -216,6 +219,53 @@ def save_watchlist(stocks):
     # Also write to local file (works for local dev; /tmp on Vercel as backup)
     try:
         WATCHLIST_FILE.write_text(json.dumps(stocks))
+    except OSError:
+        pass
+
+def load_signal_config() -> dict:
+    if _USE_KV:
+        data = _kv(["GET", "signal_config"])
+        if data:
+            try:
+                return json.loads(data)
+            except Exception:
+                pass
+    if SIGNAL_CONFIG_FILE.exists():
+        try:
+            return json.loads(SIGNAL_CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {"politicians": [], "ark_funds": [], "updated_at": ""}
+
+def save_signal_config(config: dict) -> None:
+    if _USE_KV:
+        _kv(["SET", "signal_config", json.dumps(config)])
+    try:
+        SIGNAL_CONFIG_FILE.write_text(json.dumps(config))
+    except OSError:
+        pass
+
+def load_signal_cache() -> dict:
+    if _USE_KV:
+        data = _kv(["GET", "signal_cache"])
+        if data:
+            try:
+                return json.loads(data)
+            except Exception:
+                pass
+    if SIGNAL_CACHE_FILE.exists():
+        try:
+            return json.loads(SIGNAL_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {"fetched_at": "", "partial": False,
+            "watchlist_signals": {}, "untracked_signals": [], "ark_holdings": {}}
+
+def save_signal_cache(cache: dict) -> None:
+    if _USE_KV:
+        _kv(["SET", "signal_cache", json.dumps(cache)])
+    try:
+        SIGNAL_CACHE_FILE.write_text(json.dumps(cache))
     except OSError:
         pass
 
@@ -1933,6 +1983,27 @@ def cron_watchlist_suggestions():
         return jsonify({"ok": False, "error": str(e)}), 200
 
 
+@app.route("/api/cron/signals", methods=["GET"])
+def cron_signals():
+    """Daily 09:00 ET — refresh all signal sources."""
+    if not _verify_cron(request):
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        cfg   = load_signal_config()
+        prev  = load_signal_cache()
+        cache = _refresh_signals(load_watchlist(), cfg, prev, QUIVER_KEY)
+        save_signal_cache(cache)
+        counts = {
+            "watchlist_with_signals": len(cache.get("watchlist_signals", {})),
+            "untracked":              len(cache.get("untracked_signals", [])),
+            "partial":                cache.get("partial", False),
+        }
+        return jsonify({"ok": True, "data": counts})
+    except Exception as e:
+        _logging.getLogger(__name__).error("cron_signals failed: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 200  # 200 to suppress Vercel retry
+
+
 @app.route("/api/storage-diag", methods=["GET"])
 def storage_diag():
     """Show exactly what trade/session data exists in Redis so we can tell
@@ -2144,6 +2215,21 @@ def dispatch(action: str, data: dict):
         return {"ok": True}
     if action == "clearAllSessionMessages":
         return {"ok": True}
+
+    # Signal tracking
+    if action == "getSignalConfig":
+        return load_signal_config()
+    if action == "saveSignalConfig":
+        save_signal_config(data["config"])
+        return {"saved": True}
+    if action == "getSignalCache":
+        return load_signal_cache()
+    if action == "refreshSignals":
+        cfg   = load_signal_config()
+        prev  = load_signal_cache()
+        cache = _refresh_signals(load_watchlist(), cfg, prev, QUIVER_KEY)
+        save_signal_cache(cache)
+        return cache
 
     raise ValueError(f"Unknown action: {action}")
 
