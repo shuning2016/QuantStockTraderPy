@@ -427,9 +427,13 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 
       <!-- Settings sub-panel -->
       <div id="sigpanel-settings">
+
+        <!-- Card 1: Congress members -->
         <div style="background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:14px;margin-bottom:10px">
-          <div class="ts-label" style="margin-bottom:4px">🏛️ 关注的国会议员</div>
-          <div style="font-size:11px;color:var(--t3);margin-bottom:8px">仅限美国国会议员（数据来源：Quiver Quantitative）。基金经理如 Cathie Wood、Burry 等请用 ARK 基金或暂不支持。</div>
+          <div class="ts-label" style="margin-bottom:3px">🏛️ 关注的国会议员</div>
+          <div style="font-size:11px;color:var(--t3);margin-bottom:8px">
+            仅限美国国会议员，数据来自 Quiver Quantitative API（需配置 QUIVER_KEY）。约 30 天延迟。
+          </div>
           <div id="pol-tags" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px"></div>
           <div style="display:flex;gap:6px">
             <input id="pol-inp" type="text" placeholder="例：Nancy Pelosi，回车添加…"
@@ -438,10 +442,25 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
             <button class="btn btn-sm btn-o" onclick="addPolitician()">添加</button>
           </div>
         </div>
+
+        <!-- Card 2: Fund managers -->
         <div style="background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:14px;margin-bottom:10px">
-          <div class="ts-label" style="margin-bottom:8px">🦆 关注的 ARK 基金</div>
+          <div class="ts-label" style="margin-bottom:3px">💼 关注的基金经理</div>
+          <div style="font-size:11px;color:var(--t3);margin-bottom:10px">
+            季度 13F 持仓变化，数据来自 SEC EDGAR（免费）。约 45–135 天延迟，显示仓位新增/退出/显著变化（≥10%）。
+          </div>
+          <div id="mgr-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        </div>
+
+        <!-- Card 3: ARK funds -->
+        <div style="background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:14px;margin-bottom:10px">
+          <div class="ts-label" style="margin-bottom:3px">🦆 关注的 ARK 基金</div>
+          <div style="font-size:11px;color:var(--t3);margin-bottom:8px">
+            每日持仓变化，数据来自 arkfunds.io（免费）。当日延迟。
+          </div>
           <div id="ark-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         </div>
+
         <div class="wr-run-bar">
           <button class="btn btn-sm btn-p" onclick="triggerRefreshSignals()" id="btn-refresh-signals">🔄 立即刷新信号</button>
           <span class="wr-meta-txt" id="sig-meta">每周一至五 09:00 ET 自动运行</span>
@@ -597,7 +616,7 @@ const itemKey=(sym,type)=>sym+':'+type;
 // ═══════════════════════════════════════════════════════════════
 let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={}, earningsCache={};
 let signalCache={watchlist_signals:{},untracked_signals:[],fetched_at:'',partial:false};
-let signalConfig={politicians:[],ark_funds:[]};
+let signalConfig={politicians:[],ark_funds:[],fund_managers:[]};
 
 async function loadStocks(){
   // Priority 1: localStorage (instant, survives Vercel cold starts)
@@ -867,6 +886,10 @@ function switchTab(n){
 //  SIGNAL TRACKING TAB
 // ═══════════════════════════════════════════════════════════════
 const ARK_ALL_FUNDS=['ARKK','ARKW','ARKQ','ARKG','ARKF','ARKX'];
+const FUND_MANAGERS_ALL=[
+  'Michael Burry','Carl Icahn','Bill Ackman',
+  'Stanley Druckenmiller','Warren Buffett','George Soros'
+];
 
 function switchSigTab(n){
   ['settings','untracked','all'].forEach(t=>{
@@ -901,6 +924,18 @@ function renderSigSettings(){
                          color:${on?'#15803d':'var(--t3)'};
                          border:1px solid ${on?'#22c55e':'var(--bdr)'}"
                    onclick="toggleArk('${f}')">${on?'✓ ':''}${f}</span>`;
+    }).join('');
+  }
+  const mgrEl=document.getElementById('mgr-chips');
+  if(mgrEl){
+    const sel=new Set(signalConfig.fund_managers||[]);
+    mgrEl.innerHTML=FUND_MANAGERS_ALL.map(name=>{
+      const on=sel.has(name);
+      return`<span style="padding:3px 12px;border-radius:12px;font-size:12px;cursor:pointer;
+                         background:${on?'#dbeafe':'var(--bg)'};
+                         color:${on?'#1d4ed8':'var(--t3)'};
+                         border:1px solid ${on?'#3b82f6':'var(--bdr)'}"
+                   onclick="toggleManager('${esc(name)}')">${on?'✓ ':''}${esc(name)}</span>`;
     }).join('');
   }
   const metaEl=document.getElementById('sig-meta');
@@ -979,6 +1014,13 @@ function toggleArk(fund){
   const sel=new Set(signalConfig.ark_funds||[]);
   if(sel.has(fund))sel.delete(fund);else sel.add(fund);
   signalConfig.ark_funds=[...sel];
+  saveSigConfig();
+  renderSigSettings();
+}
+function toggleManager(name){
+  const sel=new Set(signalConfig.fund_managers||[]);
+  if(sel.has(name))sel.delete(name);else sel.add(name);
+  signalConfig.fund_managers=[...sel];
   saveSigConfig();
   renderSigSettings();
 }
