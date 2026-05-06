@@ -109,3 +109,86 @@ def _parse_insider_csv(sym: str, csv_text: str) -> list[dict]:
     except Exception as e:
         logger.warning("_parse_insider_csv(%s) failed: %s", sym, e)
     return signals
+
+
+# Quiver Quantitative congressional trading bulk endpoint
+# Returns last ~30 days of all congressional trades
+_QUIVER_CONGRESS_URL = "https://api.quiverquant.com/beta/bulk/congresstrading"
+
+
+def fetch_politician_trades(
+    politicians: list[str],
+    watchlist: list[str],
+    quiver_key: str,
+) -> tuple[dict[str, list[dict]], list[dict]]:
+    """
+    Fetch recent congressional trades from Quiver Quantitative.
+
+    Returns:
+      watchlist_matches: {sym: [signal, ...]} for symbols already in watchlist
+      untracked_list:    [signal with "sym" key] for symbols NOT in watchlist
+
+    Each signal:
+      {"type": "politician", "who": str, "role": str, "action": "buy"|"sell",
+       "amount_range": str, "date": str, "sym": str}
+    """
+    if not quiver_key:
+        logger.warning("fetch_politician_trades: QUIVER_KEY not set, skipping")
+        return {}, []
+
+    watchlist_upper = {s.upper() for s in watchlist}
+    politicians_lower = {p.lower() for p in politicians}
+    watchlist_matches: dict[str, list[dict]] = {}
+    untracked_list: list[dict] = []
+
+    try:
+        resp = requests.get(
+            _QUIVER_CONGRESS_URL,
+            headers={"Authorization": f"Token {quiver_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        trades = resp.json()
+    except Exception as e:
+        logger.warning("fetch_politician_trades failed: %s", e)
+        return {}, []
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    for trade in trades:
+        rep   = (trade.get("Representative") or "").strip()
+        if rep.lower() not in politicians_lower:
+            continue
+
+        date  = (trade.get("Date") or "")[:10]
+        if date < cutoff:
+            continue
+
+        sym   = (trade.get("Ticker") or "").upper()
+        if not sym:
+            continue
+
+        tx    = (trade.get("Transaction") or "").lower()
+        if "purchase" in tx or "buy" in tx:
+            action = "buy"
+        elif "sale" in tx or "sell" in tx:
+            action = "sell"
+        else:
+            continue
+
+        signal: dict = {
+            "type":         "politician",
+            "who":          rep,
+            "role":         trade.get("Party", "") + "-" + trade.get("State", ""),
+            "action":       action,
+            "amount_range": trade.get("Range", ""),
+            "date":         date,
+            "sym":          sym,
+        }
+
+        if sym in watchlist_upper:
+            watchlist_matches.setdefault(sym, []).append(signal)
+        else:
+            untracked_list.append(signal)
+
+    return watchlist_matches, untracked_list

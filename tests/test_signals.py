@@ -68,3 +68,55 @@ def test_parse_insider_csv_empty_returns_empty_list():
     empty_csv = "X,Filing Date,Trade Date,Ticker,Company Name,Insider Name,Title,Trade Type,Price,Qty,Owned,ΔOwn,Value\n"
     result = signals._parse_insider_csv("NVDA", empty_csv)
     assert result == []
+
+
+QUIVER_RESPONSE = [
+    {"Date": "2026-05-03", "Ticker": "NVDA", "Representative": "Nancy Pelosi",
+     "Transaction": "Purchase", "Range": "$500,001-$1,000,000",
+     "Party": "D", "State": "CA"},
+    {"Date": "2026-05-01", "Ticker": "TSM", "Representative": "Nancy Pelosi",
+     "Transaction": "Purchase", "Range": "$250,001-$500,000",
+     "Party": "D", "State": "CA"},
+    {"Date": "2026-04-28", "Ticker": "AAPL", "Representative": "Other Person",
+     "Transaction": "Sale", "Range": "$1,000,001-$5,000,000",
+     "Party": "R", "State": "TX"},
+    # Old trade — should be excluded (set date far in past)
+    {"Date": "2025-01-01", "Ticker": "MSFT", "Representative": "Nancy Pelosi",
+     "Transaction": "Purchase", "Range": "$100,001-$250,000",
+     "Party": "D", "State": "CA"},
+]
+
+
+def test_fetch_politician_trades_splits_watchlist_vs_untracked(monkeypatch):
+    monkeypatch.setattr(signals.time, "sleep", lambda x: None)
+
+    class FakeResp:
+        def raise_for_status(self): pass
+        def json(self): return QUIVER_RESPONSE
+
+    monkeypatch.setattr(signals.requests, "get", lambda *a, **kw: FakeResp())
+
+    wl_matches, untracked = signals.fetch_politician_trades(
+        politicians=["Nancy Pelosi"],
+        watchlist=["NVDA", "AAPL"],
+        quiver_key="testkey",
+    )
+    # NVDA is in watchlist → watchlist_matches
+    assert "NVDA" in wl_matches
+    assert wl_matches["NVDA"][0]["action"] == "buy"
+    # TSM is NOT in watchlist → untracked
+    assert any(s["sym"] == "TSM" for s in untracked)
+    # Other Person is not in politicians list → excluded
+    assert "AAPL" not in wl_matches
+    # Old trade (2025) → excluded
+    assert not any(s["sym"] == "MSFT" for s in untracked)
+
+
+def test_fetch_politician_trades_no_key_returns_empty(monkeypatch):
+    wl, untracked = signals.fetch_politician_trades(
+        politicians=["Nancy Pelosi"],
+        watchlist=["NVDA"],
+        quiver_key="",
+    )
+    assert wl == {}
+    assert untracked == []
