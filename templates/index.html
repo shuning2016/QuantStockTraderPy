@@ -101,6 +101,11 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
 .q-chg{font-size:14px;font-weight:600}
 .q-chg.up{color:var(--red)}.q-chg.down{color:var(--green)}.q-chg.flat{color:var(--t3)}
 .q-tag{font-size:11px;color:var(--t3);background:var(--bg);padding:2px 7px;border-radius:4px}
+.sig-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sig-dot.insider{background:#f59e0b}
+.sig-dot.politician{background:#a855f7}
+.sig-dot.ark{background:#22c55e}
+.sig-dots{display:flex;gap:2px;align-items:center}
 .q-meta{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}
 .qstat{display:flex;flex-direction:column;align-items:center}
 .qstat-l{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.3px}
@@ -535,6 +540,8 @@ const itemKey=(sym,type)=>sym+':'+type;
 //  WATCHLIST
 // ═══════════════════════════════════════════════════════════════
 let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={}, earningsCache={};
+let signalCache={watchlist_signals:{},untracked_signals:[],fetched_at:'',partial:false};
+let signalConfig={politicians:[],ark_funds:[]};
 
 async function loadStocks(){
   // Priority 1: localStorage (instant, survives Vercel cold starts)
@@ -567,6 +574,21 @@ async function loadStocks(){
     }
   }catch(e){}
 }
+function renderSignalBadgeCount(){} // stub — full impl in 信号追踪 tab section
+
+async function loadSignalData(){
+  try{
+    const[cache,cfg]=await Promise.all([
+      api('getSignalCache'),
+      api('getSignalConfig'),
+    ]);
+    if(cache&&typeof cache==='object'){signalCache=cache;}
+    if(cfg&&typeof cfg==='object'){signalConfig=cfg;}
+    renderLists();
+    renderSignalBadgeCount();
+  }catch(e){}
+}
+
 async function addItem(type){
   const id=type==='stock'?'stock-inp':'crypto-inp';
   const sym=document.getElementById(id).value.trim().toUpperCase();
@@ -600,11 +622,25 @@ function renderOneList(type){
   if(!sub.length){el.innerHTML=`<div class="empty-sm">暂无${type==='stock'?'股票':'Coin'}</div>`;return;}
   el.innerHTML=sub.map(s=>{
     const key=itemKey(s.symbol,s.type),act=activeKey===key?' active':'';
+    const dots=buildSigDots(s.symbol,s.type);
     return`<div class="item-row${type==='crypto'?' crypto':''}${act}" onclick="setActive('${key}')">
       <span class="isym${type==='crypto'?' crypto':''}">${s.symbol}</span>
+      ${dots?`<div class="sig-dots">${dots}</div>`:''}
       <button class="del-btn" onclick="event.stopPropagation();deleteItem('${s.symbol}','${type}')">×</button>
     </div>`;
   }).join('');
+}
+
+function buildSigDots(sym,type){
+  if(type!=='stock')return'';
+  const sigs=(signalCache.watchlist_signals||{})[sym.toUpperCase()]||[];
+  if(!sigs.length)return'';
+  const types=new Set(sigs.map(s=>s.type));
+  let dots='';
+  if(types.has('insider'))   dots+=`<span class="sig-dot insider"   title="内部人士信号"></span>`;
+  if(types.has('politician'))dots+=`<span class="sig-dot politician" title="政客信号"></span>`;
+  if(types.has('ark'))       dots+=`<span class="sig-dot ark"        title="ARK信号"></span>`;
+  return dots;
 }
 function renderChips(){
   const el=document.getElementById('chip-row');
@@ -1700,6 +1736,7 @@ function renderDailyReview(data){
 
   // Load watchlist
   await loadStocks();
+  loadSignalData();
 
   // Backend health check
   try{
