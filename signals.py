@@ -415,7 +415,7 @@ def fetch_politician_trades(
         logger.warning("fetch_politician_trades failed: %s", e)
         return {}, []
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
 
     for trade in trades:
         rep   = (trade.get("Representative") or "").strip()
