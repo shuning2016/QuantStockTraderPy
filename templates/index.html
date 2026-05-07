@@ -1227,7 +1227,7 @@ async function initTradePanel(){
 }
 async function refreshTradePanel(){
   await syncFromBackend(currentTradeAI);
-  if(isMarketHours()&&tradeState){for(const sym of Object.keys(tradeState.holdings||{})){try{const q=await api('getQuote',{symbol:sym,type:'stock'});if(q)tradeState.lastPrices[sym]=q.c||q.pc;}catch(e){}}}
+  if(tradeState){for(const sym of Object.keys(tradeState.holdings||{})){try{const q=await api('getQuote',{symbol:sym,type:'stock'});if(q)tradeState.lastPrices[sym]=q.c||q.pc;}catch(e){}}}
   renderTradePanel();
 }
 
@@ -1454,7 +1454,7 @@ async function manualRefreshTrade(){
   toast('同步数据中…');
   try{
     await syncFromBackend(currentTradeAI);
-    if(isMarketHours()&&tradeState){for(const sym of Object.keys(tradeState.holdings||{})){try{const q=await api('getQuote',{symbol:sym,type:'stock'});if(q)tradeState.lastPrices[sym]=q.c||q.pc;}catch(e){}}}
+    if(tradeState){for(const sym of Object.keys(tradeState.holdings||{})){try{const q=await api('getQuote',{symbol:sym,type:'stock'});if(q)tradeState.lastPrices[sym]=q.c||q.pc;}catch(e){}}}
     renderTradePanel(); toast('已同步 ✓','ok');
   }catch(e){toast('同步失败','err');renderTradePanel();}
 }
