@@ -119,13 +119,17 @@ def fetch_fund_manager_signals(
     - sell: shares decreased >= 10%
     Changes < 10% are ignored.
 
-    All signals go to untracked_list because ticker symbols are not in 13F XML.
-    watchlist_matches is always {}.
+    Ticker resolution: issuer names from 13F XML are matched against SEC's
+    company_tickers.json via normalized name comparison.  Resolved tickers
+    that appear in the watchlist go to watchlist_matches; all others go to
+    untracked_list (with sym="" when resolution fails).
 
     Signal dict keys:
       type, who, fund, action, shares (delta), pct_change, issuer, cusip,
-      date (filing date YYYY-MM-DD), quarter (e.g. "Q4 2025"), sym ("")
+      date (filing date YYYY-MM-DD), quarter (e.g. "Q4 2025"), sym (ticker or "")
     """
+    watchlist_upper = {s.upper() for s in watchlist}
+    watchlist_matches: dict[str, list[dict]] = {}
     untracked: list[dict] = []
 
     for manager_name in managers:
@@ -208,7 +212,8 @@ def fetch_fund_manager_signals(
                 pct_change = round(pct, 1)
                 issuer     = cur["issuer"]
 
-            untracked.append({
+            sym = _resolve_issuer_to_ticker(issuer)
+            sig = {
                 "type":       "manager",
                 "who":        manager_name,
                 "fund":       fund_name,
@@ -219,12 +224,16 @@ def fetch_fund_manager_signals(
                 "cusip":      cusip,
                 "date":       cur_date,
                 "quarter":    quarter,
-                "sym":        "",
-            })
+                "sym":        sym,
+            }
+            if sym and sym in watchlist_upper:
+                watchlist_matches.setdefault(sym, []).append(sig)
+            else:
+                untracked.append(sig)
 
         time.sleep(0.2)
 
-    return {}, untracked
+    return watchlist_matches, untracked
 
 
 # ── SEC EDGAR Form 4 (insider trades, ~2 business day delay) ─────────────────
@@ -234,25 +243,57 @@ _EDGAR_SUBS_URL    = "https://data.sec.gov/submissions/CIK{cik}.json"
 _EDGAR_FORM4_URL   = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/form4.xml"
 
 _ticker_cik_cache: dict[str, int] = {}
+_name_ticker_cache: dict[str, str] = {}   # normalized company name → ticker
+
+import re as _re
+
+def _normalize_company_name(name: str) -> str:
+    """Lowercase, strip common legal suffixes and punctuation for fuzzy matching."""
+    n = name.lower()
+    for suffix in (" inc", " corp", " ltd", " llc", " plc", " co",
+                   " group", " holdings", " international", " technologies",
+                   " technology", " communications", " systems", " services",
+                   " financial", " capital", " com"):
+        n = n.removesuffix(suffix)
+    n = _re.sub(r"[^\w\s]", "", n)
+    return _re.sub(r"\s+", " ", n).strip()
 
 
 def _get_ticker_cik_map() -> dict[str, int]:
-    """Fetch and in-process-cache the SEC ticker → CIK mapping."""
-    global _ticker_cik_cache
+    """Fetch and in-process-cache the SEC ticker → CIK mapping.
+    Also populates _name_ticker_cache as a side-effect.
+    """
+    global _ticker_cik_cache, _name_ticker_cache
     if _ticker_cik_cache:
         return _ticker_cik_cache
     try:
         resp = requests.get(_EDGAR_TICKERS_URL,
                             headers={"User-Agent": _EDGAR_UA}, timeout=15)
         resp.raise_for_status()
+        raw = resp.json()
         _ticker_cik_cache = {
             v["ticker"].upper(): v["cik_str"]
-            for v in resp.json().values()
+            for v in raw.values()
+        }
+        _name_ticker_cache = {
+            _normalize_company_name(v["title"]): v["ticker"].upper()
+            for v in raw.values()
+            if v.get("title") and v.get("ticker")
         }
         logger.info("Loaded %d tickers from SEC EDGAR", len(_ticker_cik_cache))
     except Exception as e:
         logger.warning("_get_ticker_cik_map failed: %s", e)
     return _ticker_cik_cache
+
+
+def _resolve_issuer_to_ticker(issuer: str) -> str:
+    """Try to map a 13F issuer name to a ticker via SEC company_tickers.json.
+    Returns the ticker string or "" if not found.
+    """
+    if not _name_ticker_cache:
+        _get_ticker_cik_map()
+    key = _normalize_company_name(issuer)
+    return _name_ticker_cache.get(key, "")
 
 
 def _parse_form4_xml(xml_text: str, filing_date: str) -> list[dict]:
