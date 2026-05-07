@@ -628,7 +628,7 @@ let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={}, earnings
 let signalCache={watchlist_signals:{},untracked_signals:[],fetched_at:'',partial:false};
 let signalConfig={politicians:[],ark_funds:[],fund_managers:[]};
 function sigIsRecent(s){
-  if(!s.date)return true;
+  if(!s.date||s.type==='manager')return true;
   const cutoff=new Date();cutoff.setDate(cutoff.getDate()-14);
   return new Date(s.date)>=cutoff;
 }
@@ -669,7 +669,10 @@ function buildSignalPanel(sym){
   const sigs=raw.filter(sigIsRecent);
   if(!sigs.length)return'';
   const rows=sigs.map(s=>{
-    const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
+    const isManager=s.type==='manager';
+    const actionLbl=isManager?(s.action==='new'?'NEW':s.action==='exit'?'EXIT':s.action==='buy'?'BUY':'SELL'):(s.action==='buy'?'BUY':'SELL');
+    const badge=`<span class="sig-action-badge ${s.action==='exit'?'sell':s.action}">${actionLbl}</span>`;
+    const icon=s.type==='insider'?'🏦 ':s.type==='politician'?'🏛️ ':isManager?'💼 ':'🦆 ';
     let detail='';
     if(s.type==='insider'){
       const amt=s.amount?`$${(s.amount/1e6).toFixed(1)}M`:'';
@@ -678,10 +681,12 @@ function buildSignalPanel(sym){
       detail=s.amount_range||'';
     }else if(s.type==='ark'){
       detail=s.shares?s.shares.toLocaleString()+'股 净变动':'';
+    }else if(isManager){
+      detail=`${s.pct_change>0?'+':''}${s.pct_change}% · ${esc(s.quarter||'')}`;
     }
     return`<div class="sig-row ${s.type}">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span class="sig-row-who ${s.type}">${s.type==='insider'?'🏦 ':s.type==='politician'?'🏛️ ':'🦆 '}${esc(s.who||s.fund||'')}${s.role?` · ${esc(s.role)}`:''}${badge}</span>
+        <span class="sig-row-who ${s.type}">${icon}${esc(s.who||s.fund||'')}${s.role?` · ${esc(s.role)}`:''}${badge}</span>
         <span style="font-size:10px;color:var(--t3)">${s.date||''}</span>
       </div>
       ${detail?`<div style="margin-top:2px;color:var(--t2)">${esc(detail)}</div>`:''}
