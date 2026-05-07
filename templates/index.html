@@ -627,6 +627,11 @@ const itemKey=(sym,type)=>sym+':'+type;
 let stocks=[], activeKey=null, quoteCache={}, newsCache={}, aiCache={}, earningsCache={};
 let signalCache={watchlist_signals:{},untracked_signals:[],fetched_at:'',partial:false};
 let signalConfig={politicians:[],ark_funds:[],fund_managers:[]};
+function sigIsRecent(s){
+  if(!s.date)return true;
+  const cutoff=new Date();cutoff.setDate(cutoff.getDate()-14);
+  return new Date(s.date)>=cutoff;
+}
 
 async function loadStocks(){
   // Priority 1: localStorage (instant, survives Vercel cold starts)
@@ -660,8 +665,9 @@ async function loadStocks(){
   }catch(e){}
 }
 function buildSignalPanel(sym){
-  const sigs=(signalCache.watchlist_signals||{})[sym.toUpperCase()];
-  if(!sigs||!sigs.length)return'';
+  const raw=(signalCache.watchlist_signals||{})[sym.toUpperCase()]||[];
+  const sigs=raw.filter(sigIsRecent);
+  if(!sigs.length)return'';
   const rows=sigs.map(s=>{
     const badge=`<span class="sig-action-badge ${s.action}">${s.action==='buy'?'BUY':'SELL'}</span>`;
     let detail='';
@@ -910,7 +916,7 @@ function switchSigTab(n){
 }
 
 function renderSignalBadgeCount(){
-  const n=(signalCache.untracked_signals||[]).length;
+  const n=(signalCache.untracked_signals||[]).filter(sigIsRecent).length;
   const el=document.getElementById('sig-untracked-count');
   if(!el)return;
   if(n>0){el.textContent=n;el.style.display='';}else{el.style.display='none';}
@@ -968,7 +974,7 @@ function renderSigSettings(){
 function renderSigUntracked(){
   const el=document.getElementById('sig-untracked-list');
   if(!el)return;
-  const list=signalCache.untracked_signals||[];
+  const list=(signalCache.untracked_signals||[]).filter(sigIsRecent);
   if(!list.length){el.innerHTML='<div class="empty-panel">暂无未追踪信号</div>';return;}
   el.innerHTML=list.map(s=>{
     const isManager=s.type==='manager';
@@ -998,7 +1004,7 @@ function renderSigAll(){
   const el=document.getElementById('sig-all-list');
   if(!el)return;
   const wl=signalCache.watchlist_signals||{};
-  const all=Object.entries(wl).flatMap(([sym,sigs])=>sigs.map(s=>({...s,sym})));
+  const all=Object.entries(wl).flatMap(([sym,sigs])=>sigs.map(s=>({...s,sym}))).filter(sigIsRecent);
   all.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   if(!all.length){el.innerHTML='<div class="empty-panel">暂无信号数据</div>';return;}
   el.innerHTML=all.map(s=>{
