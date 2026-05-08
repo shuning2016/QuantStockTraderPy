@@ -378,7 +378,6 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       <div class="tab"        id="tab-signals"  onclick="switchTab('signals')">📡 信号追踪</div>
       <div class="tab"        id="tab-daily"    onclick="switchTab('daily')">📋 日检</div>
       <div class="tab"        id="tab-weekly"   onclick="switchTab('weekly')">周报 &amp; 建议</div>
-      <div class="tab"        id="tab-guardian" onclick="switchTab('guardian')">🛡️ 心跳</div>
     </div>
 
     <!-- News panel -->
@@ -488,34 +487,43 @@ body{font-family:'Google Sans',Arial,sans-serif;background:var(--bg);color:var(-
       </div>
     </div>
 
-    <!-- Daily Review panel -->
+    <!-- Daily Review panel (includes 心跳 as sub-tab) -->
     <div id="panel-daily" style="display:none">
-      <div class="dr-run-bar">
-        <input type="date" id="dr-date"
-               style="padding:5px 9px;border:1px solid var(--bdr);border-radius:6px;font-size:13px;background:var(--card);color:var(--t);outline:none">
-        <button class="btn btn-sm btn-p" onclick="runDailyReview()" id="btn-dr-run">🔍 运行日检</button>
-        <span id="dr-meta" style="font-size:12px;color:var(--t3)">
-          检查今日 10 项执行健康指标 · 不影响策略，仅检测代码/系统执行问题
-        </span>
+      <div class="wr-sub-tabs">
+        <button class="wr-sub-btn active" id="drtab-review"   onclick="switchDailyTab('review')">📋 日检</button>
+        <button class="wr-sub-btn"        id="drtab-guardian" onclick="switchDailyTab('guardian')">🛡️ 心跳</button>
       </div>
-      <div id="dr-content">
-        <div class="empty-panel">选择日期后点击「运行日检」</div>
+      <!-- 日检 sub-panel -->
+      <div id="drpanel-review">
+        <div class="dr-run-bar">
+          <input type="date" id="dr-date"
+                 style="padding:5px 9px;border:1px solid var(--bdr);border-radius:6px;font-size:13px;background:var(--card);color:var(--t);outline:none">
+          <button class="btn btn-sm btn-p" onclick="runDailyReview()" id="btn-dr-run">🔍 运行日检</button>
+          <span id="dr-meta" style="font-size:12px;color:var(--t3)">
+            检查今日 10 项执行健康指标 · 不影响策略，仅检测代码/系统执行问题
+          </span>
+        </div>
+        <div id="dr-content">
+          <div class="empty-panel">选择日期后点击「运行日检」</div>
+        </div>
+      </div>
+      <!-- 心跳 sub-panel -->
+      <div id="drpanel-guardian" style="display:none">
+        <div class="section-card">
+          <div class="section-title">
+            <span>🛡️ 守护心跳 — 心电感应 <span id="gd-count" style="font-weight:400;color:var(--t3);font-size:11px"></span></span>
+            <span style="display:flex;align-items:center;gap:10px">
+              <span id="gd-refresh-note" style="font-size:11px;color:var(--t3)">60s 自动刷新</span>
+              <button class="btn btn-sm" style="padding:3px 12px;font-size:12px" onclick="loadGuardianHeartbeats()">↺ 刷新</button>
+            </span>
+          </div>
+          <div id="gd-body"><div class="empty-panel" style="padding:32px">加载中…</div></div>
+        </div>
       </div>
     </div>
 
-    <!-- Guardian Heartbeat panel -->
-    <div id="panel-guardian" style="display:none">
-      <div class="section-card">
-        <div class="section-title">
-          <span>🛡️ 守护心跳 — 心电感应 <span id="gd-count" style="font-weight:400;color:var(--t3);font-size:11px"></span></span>
-          <span style="display:flex;align-items:center;gap:10px">
-            <span id="gd-refresh-note" style="font-size:11px;color:var(--t3)">60s 自动刷新</span>
-            <button class="btn btn-sm" style="padding:3px 12px;font-size:12px" onclick="loadGuardianHeartbeats()">↺ 刷新</button>
-          </span>
-        </div>
-        <div id="gd-body"><div class="empty-panel" style="padding:32px">加载中…</div></div>
-      </div>
-    </div>
+    <!-- Guardian placeholder (hidden — content lives inside panel-daily) -->
+    <div id="panel-guardian" style="display:none"></div>
 
     <!-- Log panel -->
     <div id="panel-messages" style="display:none">
@@ -871,10 +879,22 @@ async function analyzeItem(sym,type){
 //  TAB SWITCHING
 // ═══════════════════════════════════════════════════════════════
 let _currentLogTab='sessions', _tradeTimer=null, _gdTimer=null;
+function switchDailyTab(n){
+  ['review','guardian'].forEach(t=>{
+    document.getElementById('drpanel-'+t).style.display=t===n?'':'none';
+    document.getElementById('drtab-'+t).className='wr-sub-btn'+(t===n?' active':'');
+  });
+  if(_gdTimer){clearInterval(_gdTimer);_gdTimer=null;}
+  if(n==='guardian'){
+    loadGuardianHeartbeats();
+    _gdTimer=setInterval(loadGuardianHeartbeats,60*1000);
+  }
+}
 function switchTab(n){
   ['news','trade','messages','signals','daily','weekly','guardian'].forEach(t=>{
     document.getElementById('panel-'+t).style.display=t===n?'':'none';
-    document.getElementById('tab-'+t).className='tab'+(t===n?' active':'');
+    if(document.getElementById('tab-'+t))
+      document.getElementById('tab-'+t).className='tab'+(t===n?' active':'');
   });
   if(_tradeTimer){clearInterval(_tradeTimer);_tradeTimer=null;}
   if(_gdTimer){clearInterval(_gdTimer);_gdTimer=null;}
@@ -893,10 +913,6 @@ function switchTab(n){
   }
   if(n==='weekly') initWeeklyPanel();
   if(n==='daily')  initDailyPanel();
-  if(n==='guardian'){
-    loadGuardianHeartbeats();
-    _gdTimer=setInterval(loadGuardianHeartbeats,60*1000);
-  }
   if(n==='signals'){
     renderSigSettings();
     renderSigUntracked();
