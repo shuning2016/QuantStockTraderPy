@@ -302,7 +302,10 @@ def run_weekend_feedback(from_date: str,
 
         prompt = build_feedback_prompt(provider, decisions, from_date, to_date)
         try:
-            ai_report = call_ai_fn(prompt, "claude", 2000)
+            # TOKEN-W1: 5000 — the feedback prompt requests 6 detailed sections;
+            # 2000 (the old daily-session cap) cuts the report mid-section for any
+            # week with ≥2 trades.
+            ai_report = call_ai_fn(prompt, "claude", 5000)
         except Exception as e:
             logger.error("AI feedback call failed for %s: %s", provider, e)
             ai_report = f"[ERROR] 分析生成失败: {e}"
@@ -667,7 +670,9 @@ def run_watchlist_suggestions(from_date: str,
         sector_perf, market_news, current_watchlist, from_date, to_date)
 
     try:
-        ai_text = call_ai_fn(prompt, "claude", 2000)
+        # TOKEN-W2: 4000 — sector analysis + ADD/REMOVE blocks exceed 2000 tokens
+        # for a full 12-ETF scan with individual stock picks.
+        ai_text = call_ai_fn(prompt, "claude", 4000)
     except Exception as e:
         logger.error("Watchlist suggestion AI call failed: %s", e)
         ai_text = f"[ERROR] AI分析生成失败: {e}"
