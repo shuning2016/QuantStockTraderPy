@@ -2019,6 +2019,56 @@ def cron_watchlist_suggestions():
         return jsonify({"ok": False, "error": str(e)}), 200
 
 
+def _apply_watchlist_automation(cache: dict, watchlist: list[str]) -> list[str]:
+    """ARK auto-add + 5-day staleness cleanup. Returns updated watchlist list."""
+    from datetime import date as _date, timedelta
+
+    # ── Feature 1: ARK auto-add ───────────────────────────────────
+    current_upper = {s.upper() for s in watchlist}
+    updated = list(watchlist)
+    for sig in cache.get("untracked_signals", []):
+        if sig.get("type") == "ark" and sig.get("action") == "buy":
+            sym = (sig.get("sym") or "").upper()
+            if sym and sym not in current_upper:
+                current_upper.add(sym)
+                updated.append(sym)
+
+    # ── Feature 2: 5-day staleness cleanup ───────────────────────
+    cutoff = (_date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+    # Build {sym_upper: latest_signal_date} from all signals in cache
+    latest_dates: dict[str, str] = {}
+    all_sigs = list(cache.get("untracked_signals", []))
+    for sigs in cache.get("watchlist_signals", {}).values():
+        all_sigs.extend(sigs)
+    for sig in all_sigs:
+        sym = (sig.get("sym") or "").upper()
+        date_str = sig.get("date") or ""
+        if sym and date_str:
+            if sym not in latest_dates or date_str > latest_dates[sym]:
+                latest_dates[sym] = date_str
+
+    # Collect held symbols across all providers (safety override)
+    held: set[str] = set()
+    for provider in MODELS:
+        for sym in load_trade_state(provider).get("holdings", {}):
+            held.add(sym.upper())
+
+    # Filter: keep if held, keep if fresh signal, keep if no signal history
+    result = []
+    for sym in updated:
+        sym_upper = sym.upper()
+        if sym_upper in held:
+            result.append(sym)
+        elif sym_upper in latest_dates:
+            if latest_dates[sym_upper] >= cutoff:
+                result.append(sym)
+            # else: stale — drop silently
+        else:
+            result.append(sym)  # no signal history — keep
+    return result
+
+
 @app.route("/api/cron/signals", methods=["GET"])
 def cron_signals():
     """Daily 09:00 ET — refresh all signal sources."""
