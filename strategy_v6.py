@@ -1016,6 +1016,17 @@ _DEC_CLAUDE_NOTE = (
     "不要在Vol:/Ratio:字段写'预估/待确认/假设'，未实测请HOLD。\n"
 )
 
+_SCORE_DEEPSEEK_NOTE = (
+    # FIX-CHK2: DeepSeek follows the pipe SCORE format for the first ~10 stocks
+    # then drifts to numbered lists or prose — CHK-2 reports ~9-12/30 scored.
+    # Inject a concrete bad/good example immediately after _SCORE to reinforce
+    # the format throughout the full watchlist.
+    "\n[DeepSeek专项 — SCORE格式]\n"
+    "以上竖线格式适用于全部股票，不可中途改用数字序号或自然语言。\n"
+    "❌ 错误: 1. AAPL — 方向看涨，置信度7/10...\n"
+    "✅ 正确: ▸ AAPL|↑|C:7/10|①趋势Y ②量价(Vol:32m/20d:25m/Ratio:1.3×)Y ③P(up)=0.67\n"
+)
+
 
 def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                     news_summary: str, log_summary: str = "",
@@ -1032,9 +1043,11 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
     PROVIDER_OVERRIDES / improvement_plan_2026-05-01.md).
     """
     provider_note = ""
+    score_note    = ""
     p = (provider or "").lower()
     if p == "deepseek":
         provider_note = _DEC_DEEPSEEK_NOTE
+        score_note    = _SCORE_DEEPSEEK_NOTE
     elif p == "claude":
         provider_note = _DEC_CLAUDE_NOTE
 
@@ -1046,7 +1059,7 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
             + "Regime判断(A10): SPY ADX(14)→Trend(>25)/Transition(20-25)/Chop(<20)\n"
               "Chop=禁新仓|Transition=置信度提至C:7+\n\n"
               "输出:\n📊 Regime: [Trend/Transition/Chop] SPY:[简述]\n\n"
-            + _SCORE + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)"
+            + _SCORE + score_note + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)"
             + provider_note
         )
         user = (f"账户: {portfolio}\n\n"
@@ -1062,7 +1075,7 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
         system = (
             "量化交易员 10:00ET 开盘30min后 最佳入场时段\n\n"
             + _WATCHLIST_GUARD
-            + _COMMON + _SCORE + "\n" + _CHECKLIST + "\n"
+            + _COMMON + _SCORE + score_note + "\n" + _CHECKLIST + "\n"
             + _D6_SELF_REVIEW + "\n"   # D6: re-entry self-review
             + _FORMAT_WARN + "\n"       # FIX-5: machine-parsing enforcement
             + _DEC
