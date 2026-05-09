@@ -2052,8 +2052,11 @@ def _apply_watchlist_automation(cache: dict, watchlist: list[str]) -> list[str]:
     # Collect held symbols across all providers (safety override)
     held: set[str] = set()
     for provider in MODELS:
-        for sym in load_trade_state(provider).get("holdings", {}):
-            held.add(sym.upper())
+        try:
+            for sym in load_trade_state(provider).get("holdings", {}):
+                held.add(sym.upper())
+        except Exception:
+            pass  # if state unreadable, conservatively treat as no holdings
 
     # Filter: keep if held, keep if fresh signal, keep if no signal history
     result = []

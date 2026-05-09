@@ -118,3 +118,31 @@ def test_empty_watchlist_returns_empty():
     with patch.object(_app, "load_trade_state", return_value=_empty_state()):
         result = _app._apply_watchlist_automation(cache, [])
     assert result == []
+
+
+def test_ark_sell_does_not_reset_staleness_clock():
+    """A newer sell signal does not extend the life of a stale buy signal."""
+    cache = _cache(watchlist_signals={
+        "TSLA": [
+            {"type": "ark", "fund": "ARKK", "action": "buy",
+             "shares": 50, "date": "2026-04-01", "sym": "TSLA"},
+            {"type": "ark", "fund": "ARKK", "action": "sell",
+             "shares": 50, "date": "2026-05-08", "sym": "TSLA"},
+        ],
+    })
+    with patch.object(_app, "load_trade_state", return_value=_empty_state()):
+        result = _app._apply_watchlist_automation(cache, ["TSLA"])
+    assert "TSLA" not in result
+
+
+def test_boundary_signal_exactly_5_days_old_is_kept():
+    """Signal dated exactly 5 days ago is on the boundary — stock must be kept."""
+    from datetime import date, timedelta
+    boundary_date = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+    cache = _cache(watchlist_signals={
+        "AMZN": [{"type": "ark", "fund": "ARKK", "action": "buy",
+                  "shares": 50, "date": boundary_date, "sym": "AMZN"}],
+    })
+    with patch.object(_app, "load_trade_state", return_value=_empty_state()):
+        result = _app._apply_watchlist_automation(cache, ["AMZN"])
+    assert "AMZN" in result
