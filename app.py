@@ -2076,9 +2076,12 @@ def cron_signals():
     if not _verify_cron(request):
         return jsonify({"error": "unauthorized"}), 401
     try:
-        cfg   = load_signal_config()
-        prev  = load_signal_cache()
-        cache = _refresh_signals(load_watchlist(), cfg, prev, QUIVER_KEY)
+        cfg  = load_signal_config()
+        prev = load_signal_cache()
+        wl   = load_watchlist()
+        cache = _refresh_signals(wl, cfg, prev, QUIVER_KEY)
+        wl = _apply_watchlist_automation(cache, wl)
+        save_watchlist(wl)
         save_signal_cache(cache)
         counts = {
             "watchlist_with_signals": len(cache.get("watchlist_signals", {})),
@@ -2311,9 +2314,12 @@ def dispatch(action: str, data: dict):
     if action == "getSignalCache":
         return load_signal_cache()
     if action == "refreshSignals":
-        cfg   = load_signal_config()
-        prev  = load_signal_cache()
-        cache = _refresh_signals(load_watchlist(), cfg, prev, QUIVER_KEY)
+        cfg  = load_signal_config()
+        prev = load_signal_cache()
+        wl   = load_watchlist()
+        cache = _refresh_signals(wl, cfg, prev, QUIVER_KEY)
+        wl = _apply_watchlist_automation(cache, wl)
+        save_watchlist(wl)
         save_signal_cache(cache)
         return cache
 
