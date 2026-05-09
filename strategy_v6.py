@@ -1186,7 +1186,11 @@ def execute_decisions(decisions: list, state: dict, session: str,
     log      = state.setdefault("log", [])
     today    = state.get("_today", "")
     today_trades = state.setdefault("todayTrades", {})
-    account_ctx = account_ctx or {}
+    account_ctx  = account_ctx or {}
+    # FIX-W2: track symbols BUYed in THIS call to block duplicate BUY lines
+    # from the same AI response (e.g. two identical BUY|GOOG|... rows).
+    # Does not affect cross-session re-entries — those go through the cooldown gate.
+    session_buys: set = set()
 
     def tkey(sym):
         return f"{today}:{sym}"
@@ -1248,6 +1252,12 @@ def execute_decisions(decisions: list, state: dict, session: str,
         if action == "BUY":
             if session == "closing":
                 executed.append(f"⚠️ {sym} 收尾禁止新开仓"); continue
+            # FIX-W2: block duplicate BUY lines from the same AI response.
+            # Identical BUY rows (same symbol twice in one DECISION block) were
+            # both executing because todayTrades allows up to 2 trades/symbol/day.
+            if sym in session_buys:
+                executed.append(f"⚠️ {sym} 本次分析中已买入，禁止重复开仓，跳过"); continue
+            session_buys.add(sym)
             # B3: block overnight SWING entries on Fridays — no stop-loss coverage
             # over the weekend; a gap Monday morning bypasses any stop.
             if today:
@@ -1357,6 +1367,15 @@ def execute_decisions(decisions: list, state: dict, session: str,
             # 0.95×(1.5×ATR) to entry.  Tolerance covers rounding only.
             stop_p = _parse_stop_price(reason)
             atr_p  = _parse_atr_value(reason)
+            # FIX-W3: reject structurally inverted stop (止损倒挂).
+            # A BUY stop must sit BELOW entry; stop >= entry means the position
+            # is immediately in stop territory before any price move.
+            # Seen in May-4 week: Grok SE stop=$84.22 > entry=$84.12,
+            # DeepSeek AMD 2nd trade stop=$404.27 > entry=$403.71.
+            if stop_p is not None and price > 0 and stop_p >= price:
+                executed.append(
+                    f"⚠️ {sym} 止损倒挂: 止损${stop_p:.2f}≥买入价${price:.2f}，"
+                    f"建仓即止损，拦截"); continue
             if stop_p is not None and atr_p is not None and price > 0 and stop_p > 0:
                 stop_dist = price - stop_p
                 min_dist  = atr_p * CFG.STOP_ATR_MULT
