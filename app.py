@@ -2021,7 +2021,6 @@ def cron_watchlist_suggestions():
 
 def _apply_watchlist_automation(cache: dict, watchlist: list[str]) -> list[str]:
     """ARK auto-add + 5-day staleness cleanup. Returns updated watchlist list."""
-    from datetime import date as _date, timedelta
 
     # ── Feature 1: ARK auto-add ───────────────────────────────────
     current_upper = {s.upper() for s in watchlist}
@@ -2034,7 +2033,7 @@ def _apply_watchlist_automation(cache: dict, watchlist: list[str]) -> list[str]:
                 updated.append(sym)
 
     # ── Feature 2: 5-day staleness cleanup ───────────────────────
-    cutoff = (_date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+    cutoff = (datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d")
 
     # Build {sym_upper: latest_signal_date} from all signals in cache
     latest_dates: dict[str, str] = {}
@@ -2042,6 +2041,8 @@ def _apply_watchlist_automation(cache: dict, watchlist: list[str]) -> list[str]:
     for sigs in cache.get("watchlist_signals", {}).values():
         all_sigs.extend(sigs)
     for sig in all_sigs:
+        if sig.get("action") == "sell":
+            continue
         sym = (sig.get("sym") or "").upper()
         date_str = sig.get("date") or ""
         if sym and date_str:
@@ -2098,7 +2099,6 @@ def storage_diag():
         return jsonify({"ok": False, "message": "Redis not configured — data lives in /tmp only"})
 
     # Scan the last 6 months of log keys for both trades and sessions
-    from datetime import date as _date
     today_s = today_et()
     summary = {}
     ym = today_s[:7]
