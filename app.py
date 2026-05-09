@@ -1252,14 +1252,25 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                      for e in today_log[-5:]]
         log_summary = "\n".join(log_parts) or "今日无交易"
 
-    # S2_handoff: inject premarket NEXT_ACTION as focus_note for opening session.
-    # Each session is a fresh AI call with no memory, so we persist the
-    # premarket analysis note in state and forward it to the opening prompt.
+    # S2_handoff: inject prior-session NEXT_ACTION as focus_note.
+    # Each session is a fresh AI call with no memory, so we persist each
+    # session's NEXT_ACTION in state and forward it to the next session's prompt.
+    #   premarket → opening  (same day)
+    #   opening   → mid      (same day)
+    #   mid       → closing  (same day)
+    #   closing   → premarket (next trading day, survives state persistence)
+    _HANDOFF_READ = {
+        "opening":   ("premarket_focus", "📌 盘前分析重点"),
+        "mid":       ("opening_focus",   "📌 开盘分析重点"),
+        "closing":   ("mid_focus",       "📌 中盘分析重点"),
+        "premarket": ("closing_focus",   "📌 昨日收盘重点"),
+    }
     focus_note = ""
-    if session == "opening":
-        saved = state.get("premarket_focus", "")
+    if session in _HANDOFF_READ:
+        _key, _label = _HANDOFF_READ[session]
+        saved = state.get(_key, "")
         if saved:
-            focus_note = f"\n\n📌 盘前分析重点: {saved}"
+            focus_note = f"\n\n{_label}: {saved}"
 
     system_txt, user_txt = build_prompt_v6(session, portfolio_txt, watchlist_txt,
                                             news_txt, log_summary, focus_note,
@@ -1274,19 +1285,24 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
     regime_str, spy_adx, spy_above = parse_regime_from_text(ai_text)
     get_market_regime(state, spy_adx, spy_above)
 
-    # S2_handoff: persist the premarket NEXT_ACTION for the opening session.
-    # We extract the first non-empty line after "NEXT_ACTION:" and store it
-    # in state so run_trade_session for "opening" can inject it as focus_note.
-    if session == "premarket" and not ai_text.startswith("[ERROR]"):
+    # S2_handoff: persist this session's NEXT_ACTION for the next session.
+    _HANDOFF_WRITE = {
+        "premarket": "premarket_focus",
+        "opening":   "opening_focus",
+        "mid":       "mid_focus",
+        "closing":   "closing_focus",
+    }
+    if not ai_text.startswith("[ERROR]") and session in _HANDOFF_WRITE:
+        _save_key = _HANDOFF_WRITE[session]
         na_m = re.search(r'NEXT_ACTION\s*[：:]\s*(.+)', ai_text)
         if na_m:
-            state["premarket_focus"] = na_m.group(1).strip()[:200]
+            state[_save_key] = na_m.group(1).strip()[:200]
             _logging.getLogger("quant.session").info(
-                "[%s/premarket] Saved focus note: %s",
-                provider, state["premarket_focus"],
+                "[%s/%s] Saved focus note: %s",
+                provider, session, state[_save_key],
             )
         else:
-            state.pop("premarket_focus", None)   # clear stale note from prior day
+            state.pop(_save_key, None)   # clear stale note from prior run
 
     # Parse ATR estimates from AI text
     for s in stock_items:
