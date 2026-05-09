@@ -67,11 +67,14 @@ MAX_TOKENS = 4000   # max tokens for every AI call (STRATEGY-3: raised from 2000
                     # response truncation mid-DECISION when analysing 6-stock watchlist)
 
 # TOKEN-1: session-specific output token caps.
-# premarket is analysis-only (no DECISION blocks) so 1500 tokens is enough.
+# premarket is analysis-only (no DECISION blocks).
+# TOKEN-2: raised premarket from 1500→3000: at 1500 the SCORE section for a
+# 30-stock watchlist (~1200 tokens) exhausted the budget before the model could
+# write the final NEXT_ACTION line, breaking CHK-9 handoff every day.
 # closing needs SELLs only — fewer decisions than a full opening session.
 # opening/mid need full SCORE + DECISION for all watchlist stocks → keep at 4000.
 SESSION_MAX_TOKENS: dict = {
-    "premarket": 1500,
+    "premarket": 3000,
     "opening":   4000,
     "mid":       4000,
     "closing":   2000,
