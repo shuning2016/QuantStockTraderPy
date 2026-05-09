@@ -65,3 +65,56 @@ def test_non_ark_untracked_signal_not_added():
     with patch.object(_app, "load_trade_state", return_value=_empty_state()):
         result = _app._apply_watchlist_automation(cache, [])
     assert "NVDA" not in result
+
+
+# ── Staleness cleanup ─────────────────────────────────────────────
+
+def test_stale_stock_with_no_position_is_removed():
+    """Stock with signal older than 5 days and no open position → removed."""
+    cache = _cache(watchlist_signals={
+        "AAPL": [{"type": "ark", "fund": "ARKK", "action": "buy",
+                  "shares": 50, "date": "2026-04-01", "sym": "AAPL"}],
+    })
+    with patch.object(_app, "load_trade_state", return_value=_empty_state()):
+        result = _app._apply_watchlist_automation(cache, ["AAPL"])
+    assert "AAPL" not in result
+
+
+def test_fresh_stock_is_kept():
+    """Stock with signal within last 5 days → kept."""
+    from datetime import date, timedelta
+    fresh_date = (date.today() - timedelta(days=2)).strftime("%Y-%m-%d")
+    cache = _cache(watchlist_signals={
+        "NVDA": [{"type": "ark", "fund": "ARKK", "action": "buy",
+                  "shares": 50, "date": fresh_date, "sym": "NVDA"}],
+    })
+    with patch.object(_app, "load_trade_state", return_value=_empty_state()):
+        result = _app._apply_watchlist_automation(cache, ["NVDA"])
+    assert "NVDA" in result
+
+
+def test_held_stock_never_removed_even_if_stale():
+    """Open position protects stock from staleness removal."""
+    cache = _cache(watchlist_signals={
+        "MSFT": [{"type": "ark", "fund": "ARKK", "action": "buy",
+                  "shares": 50, "date": "2026-01-01", "sym": "MSFT"}],
+    })
+    state_with_holding = {"holdings": {"MSFT": {"shares": 10, "avgCost": 300}}}
+    with patch.object(_app, "load_trade_state", return_value=state_with_holding):
+        result = _app._apply_watchlist_automation(cache, ["MSFT"])
+    assert "MSFT" in result
+
+
+def test_manually_added_stock_with_no_signal_history_is_kept():
+    """Stocks never seen in any signal are left alone (no signal history = keep)."""
+    cache = _cache()  # empty signals
+    with patch.object(_app, "load_trade_state", return_value=_empty_state()):
+        result = _app._apply_watchlist_automation(cache, ["AMZN"])
+    assert "AMZN" in result
+
+
+def test_empty_watchlist_returns_empty():
+    cache = _cache()
+    with patch.object(_app, "load_trade_state", return_value=_empty_state()):
+        result = _app._apply_watchlist_automation(cache, [])
+    assert result == []
