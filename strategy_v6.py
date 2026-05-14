@@ -54,7 +54,7 @@ class CFG:
     TARGET_SHARPE        = 1.0
     TARGET_PROFIT_FACTOR = 1.5
     TARGET_EV_MIN        = 0.0
-    COOLDOWN_DAYS        = 2       # trading days before same-symbol re-entry (D3/S2)
+    COOLDOWN_DAYS        = 1       # trading days before same-symbol re-entry (D3/S2)
     MIN_RR               = 2.0     # minimum reward:risk ratio per trade (S1/D2)
     TRAIL_MIN_R_HIGH     = 0.75    # min R profit before trailing activates, C≥8 (G2/S4)
     TRAIL_MIN_R_LOW      = 0.50    # min R profit before trailing activates, C<8 (G2/S4)
@@ -90,8 +90,8 @@ PROVIDER_OVERRIDES = {
         "TRAIL_2R_MULT":          1.5,
         "SCALE_OUT_FRACTION":     0.50,
         "MAX_HOLDINGS_PROVIDER":  3,
-        "SCORE_MIN_NORMAL":       7,     # higher confidence floor
-        "SCORE_MIN_TRANSITION":   8,
+        "SCORE_MIN_NORMAL":       6,     # aligned with grok/deepseek floor
+        "SCORE_MIN_TRANSITION":   7,
     },
     "deepseek": {
         "MAX_SINGLE_RATIO":       0.20,
@@ -698,10 +698,12 @@ def parse_ai_decisions(ai_text):
     return prose
 
 
-def parse_confidence_score(ai_text: str, symbol: str) -> int:
+def parse_confidence_score(ai_text: str, symbol: str):
     """
     Extract confidence score for a symbol.
-    Handles spaces/newlines between symbol and C: marker (H1 fix).
+    Returns int when a C:/confidence field is found, or None when absent.
+    Callers must distinguish None (field missing) from 0 (explicit C:0/10).
+
     Search order:
       1. Symbol … C:N/10 (same line or nearby, DOTALL)
       2. Any line containing the symbol → first N/10 on that line
@@ -725,7 +727,9 @@ def parse_confidence_score(ai_text: str, symbol: str) -> int:
     m3 = re.search(r'(?:C:|置信度[：:])\s*(\d+)/10', ai_text, re.IGNORECASE)
     if m3:
         return int(m3.group(1))
-    return 0
+    # No C: field found anywhere — return None so callers can distinguish
+    # "field absent" from "explicit C:0/10".
+    return None
 
 
 def parse_regime_from_text(ai_text: str) -> tuple:
@@ -1009,9 +1013,10 @@ _DEC_DEEPSEEK_NOTE = (
 
 _DEC_CLAUDE_NOTE = (
     # FIX-A7-Claude: Claude empirically hedges in narrative then BUYs anyway.
-    # Make the contradiction explicit so it self-rejects.
+    # Narrow to strong chase-entry signals only; removed '谨慎'/'不建议' which
+    # are standard analyst hedging and were suppressing valid setups.
     "\n[Claude专项指引]\n"
-    "若你在'风险提示'中写出'追涨/买在高点/谨慎/不建议'等任一字眼，"
+    "若你在'风险提示'中写出'追涨'或'买在高点'等字眼（即你认为入场价格已追高），"
     "DECISION行必须为HOLD。禁止'风险提示警告 → 仍然BUY'的自相矛盾。\n"
     "不要在Vol:/Ratio:字段写'预估/待确认/假设'，未实测请HOLD。\n"
 )
@@ -1391,9 +1396,9 @@ def execute_decisions(decisions: list, state: dict, session: str,
             # volume (mirrors closing's no-new-positions philosophy but with a
             # disciplined escape hatch).
             if session == "mid":
-                if conf < 8:
+                if conf < 7:
                     executed.append(
-                        f"⚠️ {sym} 中盘新开仓需 C≥8 (当前C:{conf})，跳过"); continue
+                        f"⚠️ {sym} 中盘新开仓需 C≥7 (当前C:{conf})，跳过"); continue
                 if vol_ratio < 2.0:
                     executed.append(
                         f"⚠️ {sym} 中盘新开仓需量比≥2.0× (当前{vol_ratio:.1f}×)，跳过"); continue

@@ -1347,44 +1347,36 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                     "parse_mode": "synthetic_hold", "confidence": 0,
                 }]
 
-        # Inject confidence scores
+        # Inject confidence scores.
+        # parse_confidence_score returns None when no C:/confidence field exists
+        # (field absent) and an int (including 0) when an explicit value is found.
+        # This cleanly separates "AI forgot the field" from "AI wrote C:0/10".
         for d in decisions:
             if d["symbol"]:
-                d["confidence"] = parse_confidence_score(ai_text, d["symbol"])
-                if d["confidence"] == 0 and d.get("parse_mode") == "structured":
+                raw_conf = parse_confidence_score(ai_text, d["symbol"])
+                if raw_conf is not None:
+                    # Explicit value found (including 0) — use it as-is.
+                    # C:0/10 is intentional; the confidence gate will block it.
+                    d["confidence"] = raw_conf
+                    if raw_conf == 0 and d.get("parse_mode") == "structured":
+                        _logger.info(
+                            "[%s/%s] %s: explicit C:0/10 detected"
+                            " (confidence gate will block this trade)",
+                            provider, session, d["symbol"],
+                        )
+                elif d.get("parse_mode") == "structured":
                     if d["action"] == "BUY":
                         # BUG-2 (BUY side): AI gave a structured BUY but omitted
-                        # "C:X/10".  parse_confidence_score returns 0 in that case, which
-                        # would always fail the gate (0 < 6).  Default to threshold so the
-                        # trade is evaluated by all other rules rather than silently blocked
-                        # by a missing format field.
-                        # FIX-W1: but only apply the fallback when C: is genuinely absent.
-                        # parse_confidence_score also returns 0 for an explicit "C:0/10",
-                        # which was incorrectly bumped to SCORE_MIN_NORMAL — letting 0/10
-                        # trades through the gate.  Distinguish: search for any C:\d+/10
-                        # near the symbol; if found, the model rated it 0 on purpose → keep 0.
-                        _sym_esc = re.escape(d["symbol"])
-                        _c_present = re.search(
-                            rf'{_sym_esc}[\s\S]{{0,400}}?C:\s*\d+/10',
-                            ai_text, re.IGNORECASE,
+                        # the C:X/10 field entirely.  Default to threshold so the
+                        # trade is evaluated by all other gates rather than silently
+                        # blocked by a missing format field.
+                        d["confidence"] = CFG.SCORE_MIN_NORMAL
+                        _logger.info(
+                            "[%s/%s] %s: BUY — no C:X/10 found, defaulting to C:%d",
+                            provider, session, d["symbol"], CFG.SCORE_MIN_NORMAL,
                         )
-                        if not _c_present:
-                            d["confidence"] = CFG.SCORE_MIN_NORMAL
-                            _logger.info(
-                                "[%s/%s] %s: BUY — no C:X/10 found, defaulting to C:%d",
-                                provider, session, d["symbol"], CFG.SCORE_MIN_NORMAL,
-                            )
-                        else:
-                            _logger.info(
-                                "[%s/%s] %s: BUY — explicit C:0/10 detected, keeping 0"
-                                " (confidence gate will block this trade)",
-                                provider, session, d["symbol"],
-                            )
                     elif d["action"] == "SELL":
-                        # BUG-2 (SELL side): SELL decisions never had a confidence
-                        # fallback, so the trade log always recorded confidence=0 for
-                        # every sell, corrupting A07 calibration data.
-                        # Fix: carry forward the entry confidence from holdings so the
+                        # BUG-2 (SELL side): carry forward entry confidence so the
                         # sell log reflects the actual conviction level of the position.
                         held_conf = (state.get("holdings", {})
                                      .get(d["symbol"], {})
