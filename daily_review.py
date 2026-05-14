@@ -534,8 +534,9 @@ def _chk9_premarket_handoff(session_logs: list, states: dict) -> dict:
       1. Find premarket log entry per provider → confirms session ran.
       2. Check ai_analysis for a NEXT_ACTION line → confirms extraction worked.
       3. Live state["premarket_focus"] is included as supplementary evidence only.
-    Note: ai_analysis is stored truncated to 2000 chars; NEXT_ACTION lines that
-    appear beyond that point will be missed — this is a pre-existing log limit.
+    Note: ai_analysis is stored in full (append_log does not truncate). If
+    NEXT_ACTION is absent it means the AI did not output the line — not a
+    storage issue.
     """
     results  = {}
     warnings = []
