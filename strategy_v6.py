@@ -1004,7 +1004,12 @@ _DEC_DEEPSEEK_NOTE = (
     # FIX-A3: DeepSeek-specific. Empirically DeepSeek over-issues bare HOLDs
     # ("观望/等待") which produces synthetic_hold logs and zero participation.
     # Force concrete reasoning + lower the psychological bar to act.
+    # FIX-CHK3-DS: DeepSeek also omits the DECISION: header entirely, causing
+    # synthetic_hold even when it writes correct pipe rows — make the header
+    # a named, mandatory output requirement.
     "\n[DeepSeek专项指引]\n"
+    "【DECISION:头部必须存在】代码依赖'DECISION:'标题解析执行指令；"
+    "缺少此行则整个决策块被忽略，等同于未交易。\n"
     "如选择HOLD，必须在原因中给出具体技术理由（例: '未突破$XX阻力' / "
     "'量比0.8×<1.5×要求' / 'RR=1.6<2不达标'），不可仅写'观望/等待'。\n"
     "若有合格信号(C≥6 + 量比≥1.5×实测 + RR≥2)请果断BUY，"
@@ -1064,8 +1069,13 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
             + "Regime判断(A10): SPY ADX(14)→Trend(>25)/Transition(20-25)/Chop(<20)\n"
               "Chop=禁新仓|Transition=置信度提至C:7+\n\n"
               "输出:\n📊 Regime: [Trend/Transition/Chop] SPY:[简述]\n\n"
-            + _SCORE + score_note + "  ATR(14)估算:$X|新闻:1句\n\nNEXT_ACTION: 今日策略(30字内)"
-            + provider_note
+            + _SCORE + score_note + "  ATR(14)估算:$X|新闻:1句\n\n"
+            # FIX-CHK9: 【必须输出】added — without it Claude treats this as a
+            # format hint and omits the line. provider_note excluded from premarket
+            # because it only contains DECISION-block instructions (irrelevant here;
+            # premarket is analysis-only). Injecting it confused Claude's output
+            # structure and was the second cause of missing NEXT_ACTION lines.
+            "【必须输出】NEXT_ACTION: 今日策略(30字内)"
         )
         user = (f"账户: {portfolio}\n\n"
                 f"观察列表:\n{watchlist_text}{focus_note}\n\n新闻:\n{news_summary}")
