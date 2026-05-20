@@ -23,7 +23,7 @@ except ImportError:
 class CFG:
     version              = "v6.0"
     INITIAL_CASH         = 10_000.0
-    MIN_CASH_RATIO       = 0.00
+    MIN_CASH_RATIO       = 0.00     # intentional: allow full NAV deployment; 20% mention in prompts/docs is legacy
     MAX_SINGLE_RATIO     = 0.20     # STRATEGY-2: raised 10%→20% NAV per trade so position
     MAX_HOLDINGS         = 8        # sizes are meaningful on a $10 K account
     SINGLE_TRADE_RISK    = 0.015    # STRATEGY-2: raised 1%→1.5% NAV risk per trade ($150)
@@ -43,7 +43,7 @@ class CFG:
     SCORE_MIN_TRANSITION = 7
     REGIME_ADX_TREND     = 25
     REGIME_ADX_CHOP      = 20
-    REGIME_CONFIRM_DAYS  = 3
+    REGIME_CONFIRM_DAYS  = 2        # FIX-4: was 3 — reduces Chop lockout by ~1 session
     NO_TRADE_GAP_PCT     = 3.0   # reserved: skip buys on >3% gap-up (not yet enforced)
     EXEC_SLIPPAGE        = 0.002
     EXEC_COMMISSION      = 1.0
@@ -76,7 +76,7 @@ PROVIDER_OVERRIDES = {
     "grok": {
         "MAX_SINGLE_RATIO":       0.20,
         "DAILY_LOSS_CIRCUIT_PCT": 3.0,
-        "TRAIL_1R_MULT":          1.0,   # tighter trail to lock the wins it earns
+        "TRAIL_1R_MULT":          1.5,   # FIX-5: was 1.0 — too tight; AAPL Apr-26 stopped at +0.16% above entry
         "TRAIL_2R_MULT":          1.0,
         "SCALE_OUT_FRACTION":     0.50,
         "MAX_HOLDINGS_PROVIDER":  5,
@@ -226,10 +226,10 @@ def check_position_rules(state: dict, sym: str, shares: int, price: float) -> di
     min_cash = total_assets * CFG.MIN_CASH_RATIO
     usable = state["cash"] - min_cash
     if usable <= 0:
-        return {"shares": 0, "skip": True, "reason": f"现金低于20%底线，跳过{sym}"}
+        return {"shares": 0, "skip": True, "reason": f"现金不足以建仓，跳过{sym}"}
     shares = min(shares, math.floor(usable / price))
     if shares <= 0:
-        return {"shares": 0, "skip": True, "reason": f"买入后现金低于20%底线，跳过{sym}"}
+        return {"shares": 0, "skip": True, "reason": f"买入后现金不足，跳过{sym}"}
 
     if sym in holdings and price < holdings[sym]["avgCost"]:
         return {"shares": 0, "skip": True,
@@ -758,8 +758,15 @@ def parse_regime_from_text(ai_text: str) -> tuple:
     elif regime == "Transition":
         spy_adx = 22.0
         spy_above = True           # Transition: price near 200MA, assume above
-    elif regime == "Trend" and spy_adx < CFG.REGIME_ADX_TREND:
-        spy_adx = CFG.REGIME_ADX_TREND  # clamp: trust "Trend" label over a low parsed ADX
+    elif regime == "Trend":
+        if spy_adx > 0 and spy_adx < CFG.REGIME_ADX_CHOP:
+            # FIX-12: AI says Trend but parsed ADX < 20 — impossible; downgrade to Transition
+            # to prevent Trend's lax C≥6 floor from applying to a clearly-weak market.
+            regime = "Transition"
+            spy_adx = 22.0
+            spy_above = True
+        elif spy_adx < CFG.REGIME_ADX_TREND:
+            spy_adx = CFG.REGIME_ADX_TREND  # trust "Trend" label when ADX is in grey zone (20–25)
     return regime, spy_adx, spy_above
 
 
