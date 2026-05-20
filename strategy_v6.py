@@ -1549,11 +1549,27 @@ def execute_decisions(decisions: list, state: dict, session: str,
             today_trades[tk] = today_trades.get(tk, 0) + 1
             state.setdefault("dailyPnL", {})[today] = (
                 state["dailyPnL"].get(today, 0) + real)
+            # FIX-8: compute exit tag server-side so AI's stated reason
+            # (e.g. "硬止盈+5%" written when actual return is 0%) cannot
+            # corrupt the trade log. May-4 Claude bug: GOOG logged as
+            # HARD_PROFIT with 0% actual return because the AI wrote that reason.
+            pnl_pct_check = (price - avg_cost) / avg_cost * 100 if avg_cost else 0
+            _hard_stop_pct = get_provider_cfg(provider, "DAILY_LOSS_CIRCUIT_PCT", CFG.HARD_STOP_PCT)
+            if pnl_pct_check >= CFG.HARD_PROFIT_PCT:
+                ai_exit_tag = "HARD_PROFIT"
+            elif h.get("stopPrice") is not None and price <= h["stopPrice"]:
+                ai_exit_tag = "ATR_STOP"
+            elif pnl_pct_check <= -_hard_stop_pct:
+                ai_exit_tag = "HARD_STOP"
+            elif state.get("currentRegime") == "Chop":
+                ai_exit_tag = "REGIME_EXIT"
+            else:
+                ai_exit_tag = "AI_DISCRETIONARY"
             log.append(build_trade_log_entry("sell", {
                 "sym": sym, "shares": sell_sh, "price": price,
                 "realizedPnl": real, "reason": reason, "confidence": conf,
                 "session": session, "parse_error": parse_err,
-            }, state))
+            }, state, ai_exit_tag))
             if sell_sh >= h["shares"]:
                 del holdings[sym]
             else:
@@ -1572,6 +1588,35 @@ def execute_decisions(decisions: list, state: dict, session: str,
             sign  = "盈" if real >= 0 else "亏"
             extra = " ⚠️[prose解析,不计入A07]" if parse_err else ""
             executed.append(f"✅ 卖出 {sym} {sell_sh}股 @${price:.2f} {sign}${abs(real):.2f}{extra}")
+
+    # FIX-9: no-trade session diagnostic — when no BUYs executed, record which
+    # gates fired so the UI / operator can see exactly why the session was silent.
+    _buys_executed = sum(1 for m in executed if m.startswith("✅ 买入"))
+    if _buys_executed == 0 and any(m.startswith("⚠️") for m in executed):
+        _gate_counts: dict = {}
+        _gate_patterns = [
+            ("prose_fallback",  "prose_fallback"),
+            ("量比缺失",         "vol_missing"),
+            ("量比",            "vol_low"),
+            ("缺少RR",          "rr_missing"),
+            ("RR=",             "rr_low"),
+            ("置信度",           "conf_low"),
+            ("信号过期",         "stale_signal"),
+            ("止损倒挂",         "stop_inverted"),
+            ("Regime",          "regime_block"),
+            ("熔断",            "circuit_break"),
+            ("冷却期",           "cooldown"),
+            ("追涨",            "chase_block"),
+            ("中盘",            "mid_session_bar"),
+        ]
+        for _msg in executed:
+            for _pat, _key in _gate_patterns:
+                if _pat in _msg:
+                    _gate_counts[_key] = _gate_counts.get(_key, 0) + 1
+                    break
+        if _gate_counts:
+            state["lastNoTradeGates"] = _gate_counts
+            state["lastNoTradeSession"] = session
 
     if len(log) > 500:
         state["log"] = log[-500:]
