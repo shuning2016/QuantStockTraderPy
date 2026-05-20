@@ -1315,6 +1315,15 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     f"⚠️ {sym} prose_fallback BUY 拦截 — "
                     f"AI未使用竖线格式，无法验证R:R/信号/ATR，不执行"
                 ); continue
+            # FIX-10: server-side enforcement of Claude's 追涨 rule (complements prompt-level).
+            # If the DECISION reason itself contains chase-entry language, the prompt rule
+            # was ignored — catch it at the code layer.
+            if (provider or "").lower() == "claude":
+                _chase = ("追涨", "买在高点")
+                if any(w in reason for w in _chase):
+                    executed.append(
+                        f"⚠️ {sym} [Claude] reason含追涨/买在高点字眼，"
+                        f"服务端强制HOLD（prompt规则补充执行）"); continue
             regime = state.get("currentRegime", "Trend")
             # A7: per-provider confidence floor (Claude=7/8, Grok=6/7, DeepSeek=6/6)
             if regime == "Transition":
@@ -1356,9 +1365,16 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     else:
                         executed.append(f"⚠️ {sym} 冷却期（上次出场:{last_exit}，需满{CFG.COOLDOWN_DAYS}交易日），跳过"); continue
 
-            # S1/D2: minimum R:R gate
+            # S1/D2: minimum R:R gate — treat absent R:R same as absent volume: block.
+            # _parse_rr tries RR=X label first, then calculates from Target%/Stop%.
+            # If neither exists the trade cannot be evaluated → block (FIX-1).
             rr = _parse_rr(reason)
-            if rr is not None and rr < CFG.MIN_RR:
+            if rr is None:
+                executed.append(
+                    f"⚠️ {sym} DECISION缺少RR=或Target%/Stop%字段，"
+                    f"无法验证风险收益比，跳过"
+                ); continue
+            if rr < CFG.MIN_RR:
                 executed.append(f"⚠️ {sym} RR={rr:.2f}<{CFG.MIN_RR:.1f}最低要求，跳过"); continue
 
             # FIX-#4a: reject fabricated volume — when the model writes
@@ -1413,9 +1429,13 @@ def execute_decisions(decisions: list, state: dict, session: str,
             # volume (mirrors closing's no-new-positions philosophy but with a
             # disciplined escape hatch).
             if session == "mid":
-                if conf < 7:
+                # FIX-7: was hardcoded C≥7 — DeepSeek's SCORE_MIN_TRANSITION=6 was being
+                # double-blocked (passed main gate at 6, then hit mid gate at 7).
+                # Use min_conf+1 so each provider's bar is respected.
+                mid_min_conf = min_conf + 1
+                if conf < mid_min_conf:
                     executed.append(
-                        f"⚠️ {sym} 中盘新开仓需 C≥7 (当前C:{conf})，跳过"); continue
+                        f"⚠️ {sym} 中盘新开仓需 C≥{mid_min_conf} (当前C:{conf})，跳过"); continue
                 if vol_ratio < 2.0:
                     executed.append(
                         f"⚠️ {sym} 中盘新开仓需量比≥2.0× (当前{vol_ratio:.1f}×)，跳过"); continue
@@ -1435,11 +1455,19 @@ def execute_decisions(decisions: list, state: dict, session: str,
                 # implied entry where AI saw the setup = stop + 1.5×ATR
                 implied_entry = stop_p_b8 + atr_p_b8 * CFG.STOP_ATR_MULT
                 if implied_entry > 0:
-                    drift_pct = abs(price - implied_entry) / implied_entry * 100
-                    if drift_pct > STALE_SIGNAL_DRIFT_PCT:
+                    # FIX-3: directional drift — price falling toward stop = dangerous (block);
+                    # price rising away from entry = momentum confirmed (allow up to 2×threshold).
+                    drift_signed = (price - implied_entry) / implied_entry * 100
+                    if drift_signed < -STALE_SIGNAL_DRIFT_PCT:
                         executed.append(
-                            f"⚠️ {sym} 信号过期: AI隐含入场${implied_entry:.2f} vs "
-                            f"现价${price:.2f} 偏差{drift_pct:.1f}%>{STALE_SIGNAL_DRIFT_PCT}%, 跳过"); continue
+                            f"⚠️ {sym} 信号过期: 价格已下行{abs(drift_signed):.1f}%"
+                            f"（隐含入场${implied_entry:.2f} vs 现价${price:.2f}）"
+                            f"，止损空间收窄，跳过"); continue
+                    if drift_signed > STALE_SIGNAL_DRIFT_PCT * 2:
+                        executed.append(
+                            f"⚠️ {sym} 信号过期: 价格已上行{drift_signed:.1f}%"
+                            f"（隐含入场${implied_entry:.2f} vs 现价${price:.2f}）"
+                            f"，追入成本过高，跳过"); continue
 
             sizing = calc_position_size(calc_nav(state), price, atr, regime,
                                         provider=provider, confidence=conf)
