@@ -1044,6 +1044,18 @@ _SCORE_DEEPSEEK_NOTE = (
     "✅ 正确: ▸ AAPL|↑|C:7/10|①趋势Y ②量价(Vol:32m/20d:25m/Ratio:1.3×)Y ③P(up)=0.67\n"
 )
 
+_SCORE_GROK_NOTE = (
+    # FIX-CHK2: Grok sometimes substitutes text direction words ("Bullish",
+    # "LONG", "看涨") for the required arrow symbol, causing CHK-2 to report
+    # "no SCORE lines found" even when Grok scored all stocks.
+    # Remind Grok to use exactly ↑ ↓ → for the direction field.
+    "\n[Grok专项 — SCORE方向符号]\n"
+    "第二列方向字段必须使用 ↑（看涨）↓（看跌）→（中性），"
+    "禁止使用文字(如Bullish/LONG/看涨)或表情符号。\n"
+    "✅ 正确: ▸ NVDA|↑|C:7/10|①趋势Y ②量价(Vol:52m/20d:38m/Ratio:1.4×)Y ③P(up)=0.72\n"
+    "❌ 错误: ▸ NVDA|Bullish|C:7/10|...\n"
+)
+
 
 def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
                     news_summary: str, log_summary: str = "",
@@ -1067,6 +1079,8 @@ def build_prompt_v6(session: str, portfolio: str, watchlist_text: str,
         score_note    = _SCORE_DEEPSEEK_NOTE
     elif p == "claude":
         provider_note = _DEC_CLAUDE_NOTE
+    elif p == "grok":
+        score_note    = _SCORE_GROK_NOTE   # FIX-CHK2: prevent text direction words
 
     if session == "premarket":
         system = (

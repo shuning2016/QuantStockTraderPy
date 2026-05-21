@@ -138,18 +138,25 @@ def _count_score_lines(ai_text: str) -> int:
     though the prompt forbids it.  The table-row pattern `| SYM |` is safe because
     the header row uses Chinese (標的, not A-Z) and the separator row (|---|) has
     no uppercase letter.
+    FIX-4 (CHK-2 Grok): third alternative anchors on `C:[digit]` instead of the
+    arrow character — catches Grok writing text direction words like "Bullish"/
+    "LONG"/"看涨" instead of ↑↓→.  Pattern: SYM|<any>|C:X to avoid matching
+    DECISION rows (BUY/HOLD have no C: in the second pipe field).
 
     Matches:
-      ▸ AAPL|↑|...    pipe-delimited (preferred — prompt template)
-      - AAPL|↑|...    Grok bullet variant
-      AMZN|↑|...      no bullet
-      | AAPL | ...    markdown table row (fallback for large watchlists)
+      ▸ AAPL|↑|C:7/10|...    pipe-delimited, arrow direction (preferred)
+      ▸ AAPL|Bullish|C:7/10  pipe-delimited, text direction (Grok variant)
+      - AAPL|↑|...           Grok dash bullet
+      AMZN|↑|...             no bullet
+      | AAPL | ...           markdown table row (fallback for large watchlists)
     """
     return len(re.findall(
         r'(?:'
-        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|\s*[↑↓→=\-]'  # pipe-delimited SCORE
+        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|\s*[↑↓→=\-]'      # arrow direction
         r'|'
-        r'^\s*\|\s*[A-Z][A-Z0-9.]{0,5}\s*\|'                               # markdown table row
+        r'^\s*(?:[▸►▷>\-\*•–→]\s*)?[A-Z][A-Z0-9.]{0,5}\s*\|[^|\n]*\|\s*C:\d'  # C:X anchor (text dir)
+        r'|'
+        r'^\s*\|\s*[A-Z][A-Z0-9.]{0,5}\s*\|'                                    # markdown table row
         r')',
         ai_text, re.MULTILINE,
     ))
@@ -566,7 +573,11 @@ def _chk9_premarket_handoff(session_logs: list, states: dict) -> dict:
             warnings.append(f"{prov}: premarket ran but AI returned error — no focus note")
             continue
 
-        na_match   = re.search(r'NEXT_ACTION\s*[：:]\s*(.+)', ai_text)
+        # FIX-CHK9: Claude often writes **NEXT_ACTION**: in bold markdown.
+        # Pattern \** allows 0-or-more asterisks on both sides of the colon so
+        # "**NEXT_ACTION**: text", "**NEXT_ACTION**：text", and plain
+        # "NEXT_ACTION: text" all match correctly.
+        na_match   = re.search(r'NEXT_ACTION\**\s*[：:]\**\s*(.+)', ai_text)
         focus_from_log = na_match.group(1).strip()[:80] if na_match else None
 
         results[prov] = {

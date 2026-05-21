@@ -1294,7 +1294,9 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
     }
     if not ai_text.startswith("[ERROR]") and session in _HANDOFF_WRITE:
         _save_key = _HANDOFF_WRITE[session]
-        na_m = re.search(r'NEXT_ACTION\s*[：:]\s*(.+)', ai_text)
+        # FIX-CHK9: Claude writes **NEXT_ACTION**: in bold markdown.
+        # \** allows 0-or-more asterisks around the colon.
+        na_m = re.search(r'NEXT_ACTION\**\s*[：:]\**\s*(.+)', ai_text)
         if na_m:
             state[_save_key] = na_m.group(1).strip()[:200]
             _logging.getLogger("quant.session").info(
