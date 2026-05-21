@@ -23,7 +23,7 @@ except ImportError:
 class CFG:
     version              = "v6.0"
     INITIAL_CASH         = 10_000.0
-    MIN_CASH_RATIO       = 0.00
+    MIN_CASH_RATIO       = 0.00     # intentional: allow full NAV deployment; 20% mention in prompts/docs is legacy
     MAX_SINGLE_RATIO     = 0.20     # STRATEGY-2: raised 10%→20% NAV per trade so position
     MAX_HOLDINGS         = 8        # sizes are meaningful on a $10 K account
     SINGLE_TRADE_RISK    = 0.015    # STRATEGY-2: raised 1%→1.5% NAV risk per trade ($150)
@@ -43,7 +43,7 @@ class CFG:
     SCORE_MIN_TRANSITION = 7
     REGIME_ADX_TREND     = 25
     REGIME_ADX_CHOP      = 20
-    REGIME_CONFIRM_DAYS  = 3
+    REGIME_CONFIRM_DAYS  = 2        # FIX-4: was 3 — reduces Chop lockout by ~1 session
     NO_TRADE_GAP_PCT     = 3.0   # reserved: skip buys on >3% gap-up (not yet enforced)
     EXEC_SLIPPAGE        = 0.002
     EXEC_COMMISSION      = 1.0
@@ -76,7 +76,7 @@ PROVIDER_OVERRIDES = {
     "grok": {
         "MAX_SINGLE_RATIO":       0.20,
         "DAILY_LOSS_CIRCUIT_PCT": 3.0,
-        "TRAIL_1R_MULT":          1.0,   # tighter trail to lock the wins it earns
+        "TRAIL_1R_MULT":          1.5,   # FIX-5: was 1.0 — too tight; AAPL Apr-26 stopped at +0.16% above entry
         "TRAIL_2R_MULT":          1.0,
         "SCALE_OUT_FRACTION":     0.50,
         "MAX_HOLDINGS_PROVIDER":  5,
@@ -226,10 +226,10 @@ def check_position_rules(state: dict, sym: str, shares: int, price: float) -> di
     min_cash = total_assets * CFG.MIN_CASH_RATIO
     usable = state["cash"] - min_cash
     if usable <= 0:
-        return {"shares": 0, "skip": True, "reason": f"现金低于20%底线，跳过{sym}"}
+        return {"shares": 0, "skip": True, "reason": f"现金不足以建仓，跳过{sym}"}
     shares = min(shares, math.floor(usable / price))
     if shares <= 0:
-        return {"shares": 0, "skip": True, "reason": f"买入后现金低于20%底线，跳过{sym}"}
+        return {"shares": 0, "skip": True, "reason": f"买入后现金不足，跳过{sym}"}
 
     if sym in holdings and price < holdings[sym]["avgCost"]:
         return {"shares": 0, "skip": True,
@@ -758,8 +758,15 @@ def parse_regime_from_text(ai_text: str) -> tuple:
     elif regime == "Transition":
         spy_adx = 22.0
         spy_above = True           # Transition: price near 200MA, assume above
-    elif regime == "Trend" and spy_adx < CFG.REGIME_ADX_TREND:
-        spy_adx = CFG.REGIME_ADX_TREND  # clamp: trust "Trend" label over a low parsed ADX
+    elif regime == "Trend":
+        if spy_adx > 0 and spy_adx < CFG.REGIME_ADX_CHOP:
+            # FIX-12: AI says Trend but parsed ADX < 20 — impossible; downgrade to Transition
+            # to prevent Trend's lax C≥6 floor from applying to a clearly-weak market.
+            regime = "Transition"
+            spy_adx = 22.0
+            spy_above = True
+        elif spy_adx < CFG.REGIME_ADX_TREND:
+            spy_adx = CFG.REGIME_ADX_TREND  # trust "Trend" label when ADX is in grey zone (20–25)
     return regime, spy_adx, spy_above
 
 
@@ -1308,6 +1315,15 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     f"⚠️ {sym} prose_fallback BUY 拦截 — "
                     f"AI未使用竖线格式，无法验证R:R/信号/ATR，不执行"
                 ); continue
+            # FIX-10: server-side enforcement of Claude's 追涨 rule (complements prompt-level).
+            # If the DECISION reason itself contains chase-entry language, the prompt rule
+            # was ignored — catch it at the code layer.
+            if (provider or "").lower() == "claude":
+                _chase = ("追涨", "买在高点")
+                if any(w in reason for w in _chase):
+                    executed.append(
+                        f"⚠️ {sym} [Claude] reason含追涨/买在高点字眼，"
+                        f"服务端强制HOLD（prompt规则补充执行）"); continue
             regime = state.get("currentRegime", "Trend")
             # A7: per-provider confidence floor (Claude=7/8, Grok=6/7, DeepSeek=6/6)
             if regime == "Transition":
@@ -1349,9 +1365,16 @@ def execute_decisions(decisions: list, state: dict, session: str,
                     else:
                         executed.append(f"⚠️ {sym} 冷却期（上次出场:{last_exit}，需满{CFG.COOLDOWN_DAYS}交易日），跳过"); continue
 
-            # S1/D2: minimum R:R gate
+            # S1/D2: minimum R:R gate — treat absent R:R same as absent volume: block.
+            # _parse_rr tries RR=X label first, then calculates from Target%/Stop%.
+            # If neither exists the trade cannot be evaluated → block (FIX-1).
             rr = _parse_rr(reason)
-            if rr is not None and rr < CFG.MIN_RR:
+            if rr is None:
+                executed.append(
+                    f"⚠️ {sym} DECISION缺少RR=或Target%/Stop%字段，"
+                    f"无法验证风险收益比，跳过"
+                ); continue
+            if rr < CFG.MIN_RR:
                 executed.append(f"⚠️ {sym} RR={rr:.2f}<{CFG.MIN_RR:.1f}最低要求，跳过"); continue
 
             # FIX-#4a: reject fabricated volume — when the model writes
@@ -1406,9 +1429,13 @@ def execute_decisions(decisions: list, state: dict, session: str,
             # volume (mirrors closing's no-new-positions philosophy but with a
             # disciplined escape hatch).
             if session == "mid":
-                if conf < 7:
+                # FIX-7: was hardcoded C≥7 — DeepSeek's SCORE_MIN_TRANSITION=6 was being
+                # double-blocked (passed main gate at 6, then hit mid gate at 7).
+                # Use min_conf+1 so each provider's bar is respected.
+                mid_min_conf = min_conf + 1
+                if conf < mid_min_conf:
                     executed.append(
-                        f"⚠️ {sym} 中盘新开仓需 C≥7 (当前C:{conf})，跳过"); continue
+                        f"⚠️ {sym} 中盘新开仓需 C≥{mid_min_conf} (当前C:{conf})，跳过"); continue
                 if vol_ratio < 2.0:
                     executed.append(
                         f"⚠️ {sym} 中盘新开仓需量比≥2.0× (当前{vol_ratio:.1f}×)，跳过"); continue
@@ -1428,11 +1455,19 @@ def execute_decisions(decisions: list, state: dict, session: str,
                 # implied entry where AI saw the setup = stop + 1.5×ATR
                 implied_entry = stop_p_b8 + atr_p_b8 * CFG.STOP_ATR_MULT
                 if implied_entry > 0:
-                    drift_pct = abs(price - implied_entry) / implied_entry * 100
-                    if drift_pct > STALE_SIGNAL_DRIFT_PCT:
+                    # FIX-3: directional drift — price falling toward stop = dangerous (block);
+                    # price rising away from entry = momentum confirmed (allow up to 2×threshold).
+                    drift_signed = (price - implied_entry) / implied_entry * 100
+                    if drift_signed < -STALE_SIGNAL_DRIFT_PCT:
                         executed.append(
-                            f"⚠️ {sym} 信号过期: AI隐含入场${implied_entry:.2f} vs "
-                            f"现价${price:.2f} 偏差{drift_pct:.1f}%>{STALE_SIGNAL_DRIFT_PCT}%, 跳过"); continue
+                            f"⚠️ {sym} 信号过期: 价格已下行{abs(drift_signed):.1f}%"
+                            f"（隐含入场${implied_entry:.2f} vs 现价${price:.2f}）"
+                            f"，止损空间收窄，跳过"); continue
+                    if drift_signed > STALE_SIGNAL_DRIFT_PCT * 2:
+                        executed.append(
+                            f"⚠️ {sym} 信号过期: 价格已上行{drift_signed:.1f}%"
+                            f"（隐含入场${implied_entry:.2f} vs 现价${price:.2f}）"
+                            f"，追入成本过高，跳过"); continue
 
             sizing = calc_position_size(calc_nav(state), price, atr, regime,
                                         provider=provider, confidence=conf)
@@ -1514,11 +1549,27 @@ def execute_decisions(decisions: list, state: dict, session: str,
             today_trades[tk] = today_trades.get(tk, 0) + 1
             state.setdefault("dailyPnL", {})[today] = (
                 state["dailyPnL"].get(today, 0) + real)
+            # FIX-8: compute exit tag server-side so AI's stated reason
+            # (e.g. "硬止盈+5%" written when actual return is 0%) cannot
+            # corrupt the trade log. May-4 Claude bug: GOOG logged as
+            # HARD_PROFIT with 0% actual return because the AI wrote that reason.
+            pnl_pct_check = (price - avg_cost) / avg_cost * 100 if avg_cost else 0
+            _hard_stop_pct = get_provider_cfg(provider, "DAILY_LOSS_CIRCUIT_PCT", CFG.HARD_STOP_PCT)
+            if pnl_pct_check >= CFG.HARD_PROFIT_PCT:
+                ai_exit_tag = "HARD_PROFIT"
+            elif h.get("stopPrice") is not None and price <= h["stopPrice"]:
+                ai_exit_tag = "ATR_STOP"
+            elif pnl_pct_check <= -_hard_stop_pct:
+                ai_exit_tag = "HARD_STOP"
+            elif state.get("currentRegime") == "Chop":
+                ai_exit_tag = "REGIME_EXIT"
+            else:
+                ai_exit_tag = "AI_DISCRETIONARY"
             log.append(build_trade_log_entry("sell", {
                 "sym": sym, "shares": sell_sh, "price": price,
                 "realizedPnl": real, "reason": reason, "confidence": conf,
                 "session": session, "parse_error": parse_err,
-            }, state))
+            }, state, ai_exit_tag))
             if sell_sh >= h["shares"]:
                 del holdings[sym]
             else:
@@ -1537,6 +1588,35 @@ def execute_decisions(decisions: list, state: dict, session: str,
             sign  = "盈" if real >= 0 else "亏"
             extra = " ⚠️[prose解析,不计入A07]" if parse_err else ""
             executed.append(f"✅ 卖出 {sym} {sell_sh}股 @${price:.2f} {sign}${abs(real):.2f}{extra}")
+
+    # FIX-9: no-trade session diagnostic — when no BUYs executed, record which
+    # gates fired so the UI / operator can see exactly why the session was silent.
+    _buys_executed = sum(1 for m in executed if m.startswith("✅ 买入"))
+    if _buys_executed == 0 and any(m.startswith("⚠️") for m in executed):
+        _gate_counts: dict = {}
+        _gate_patterns = [
+            ("prose_fallback",  "prose_fallback"),
+            ("量比缺失",         "vol_missing"),
+            ("量比",            "vol_low"),
+            ("缺少RR",          "rr_missing"),
+            ("RR=",             "rr_low"),
+            ("置信度",           "conf_low"),
+            ("信号过期",         "stale_signal"),
+            ("止损倒挂",         "stop_inverted"),
+            ("Regime",          "regime_block"),
+            ("熔断",            "circuit_break"),
+            ("冷却期",           "cooldown"),
+            ("追涨",            "chase_block"),
+            ("中盘",            "mid_session_bar"),
+        ]
+        for _msg in executed:
+            for _pat, _key in _gate_patterns:
+                if _pat in _msg:
+                    _gate_counts[_key] = _gate_counts.get(_key, 0) + 1
+                    break
+        if _gate_counts:
+            state["lastNoTradeGates"] = _gate_counts
+            state["lastNoTradeSession"] = session
 
     if len(log) > 500:
         state["log"] = log[-500:]

@@ -1366,14 +1366,15 @@ def _run_trade_session_locked(session: str, provider: str) -> dict:
                         )
                 elif d.get("parse_mode") == "structured":
                     if d["action"] == "BUY":
-                        # BUG-2 (BUY side): AI gave a structured BUY but omitted
-                        # the C:X/10 field entirely.  Default to threshold so the
-                        # trade is evaluated by all other gates rather than silently
-                        # blocked by a missing format field.
-                        d["confidence"] = CFG.SCORE_MIN_NORMAL
-                        _logger.info(
-                            "[%s/%s] %s: BUY — no C:X/10 found, defaulting to C:%d",
-                            provider, session, d["symbol"], CFG.SCORE_MIN_NORMAL,
+                        # FIX-6: missing C:X/10 is now treated as a format violation,
+                        # same as missing Vol:/Ratio: (which blocks the trade).
+                        # Mark with sentinel -1 so the confidence gate in
+                        # execute_decisions blocks it with a clear message.
+                        d["confidence"] = -1
+                        _logger.warning(
+                            "[%s/%s] %s: BUY — no C:X/10 field found; "
+                            "marking confidence=-1 (will be blocked by confidence gate)",
+                            provider, session, d["symbol"],
                         )
                     elif d["action"] == "SELL":
                         # BUG-2 (SELL side): carry forward entry confidence so the
